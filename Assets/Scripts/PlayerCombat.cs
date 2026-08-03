@@ -5,7 +5,10 @@ using UnityEngine;
 /// Fighting-mode ability set:
 ///   - Basic attack (left click): landing one hit opens a combo that lets you
 ///     land up to 3 more basic attacks while the enemy is locked in Stunned
-///     state — TSB-style stagger juggling.
+///     state — TSB-style stagger juggling. Each swing has its own 0.2s cooldown,
+///     and if you don't land the next hit within the combo window (or after the
+///     4th hit), you're locked out of basic attacks for 1.5s — gives the enemy
+///     room to fight back instead of getting permanently stunlocked.
 ///   - Q: short dash toward facing direction. Connects with an enemy along the
 ///     way -> grabs them and lands one guaranteed hit, opening a combo.
 ///   - E: heavy kick. Slower windup, big damage + knockback, combo finisher.
@@ -36,10 +39,16 @@ public class PlayerCombat : MonoBehaviour
     [Header("Basic Attack Combo (TSB-style stagger)")]
     public float basicAttackDamage = 8f;
     public float basicAttackRange = 1f;
-    public float comboStunDuration = 0.6f; // how long each hit locks the enemy
-    public float comboWindow = 0.5f;       // time allowed to land the *next* hit
-    public int maxComboHits = 4;           // 1 opener + 3 follow-ups, per spec
+    public float comboStunDuration = 0.6f;  // how long each hit locks the enemy
+    public float comboWindow = 0.5f;        // time allowed to land the *next* hit before the combo drops
+    public float attackCooldown = 0.2f;     // minimum time between individual basic-attack swings (stops mashing)
+    public float comboEndLockout = 1.5f;    // can't throw a basic attack for this long after a dropped combo or the 4th hit
+    public int maxComboHits = 4;            // 1 opener + 3 follow-ups, per spec
     public Vector2 comboFinisherKnockback = new Vector2(6f, 4f);
+    [Tooltip("Spawned on hits 1–3 of the combo.")]
+    public GameObject basicHitParticlePrefab;
+    [Tooltip("Spawned on the 4th (finisher) hit instead of the basic one.")]
+    public GameObject finisherHitParticlePrefab;
 
     [Header("Q — Dash Grab")]
     public float dashDistance = 3.5f;
@@ -60,11 +69,25 @@ public class PlayerCombat : MonoBehaviour
     public float heavyKickCooldown = 1.5f;
 
     [Header("R — Knockdown")]
+    [Tooltip("Prefab with a Collider2D + MeleeHitbox component, plus whatever Animator/VFX plays your swing.")]
+    public GameObject knockdownHitboxPrefab;
     public float knockdownWindup = 0.2f;
-    public float knockdownRange = 1.1f;
+    public float knockdownSpawnDistance = 0.7f; // how far from hitOrigin, along the aim direction, the hitbox spawns
+    public float knockdownRecovery = 0.1f;      // control returns this long after the hitbox is thrown
     public float knockdownDamage = 12f;
+    public float knockdownKnockbackForce = 2f;  // small — this move's job is the knockdown, not a big launch
     public float knockdownDuration = 1.4f;
     public float knockdownCooldown = 2f;
+
+    [Header("R — Ground Slam VFX")]
+    [Tooltip("Spawned at the enemy the instant the knockdown hit connects.")]
+    public GameObject knockdownHitParticlePrefab;
+    [Tooltip("Spawned at the ground point once the enemy has visually gone down.")]
+    public GameObject groundSlamParticlePrefab;
+    public LayerMask groundLayer;
+    [Tooltip("How long to wait after the hit before raycasting for the ground and playing the slam — line this up with the enemy's knockdown-sink time (HitReactionVisuals' knockdownSinkDepth / sinkRiseSpeed).")]
+    public float groundSlamDelay = 0.1f;
+    public float groundSlamRayDistance = 5f;
 
     [Header("T — Combo Continuer (hits a knocked-down enemy)")]
     public float comboExtendRange = 1.3f;
@@ -79,6 +102,8 @@ public class PlayerCombat : MonoBehaviour
     private CombatTarget comboTarget;
     private int comboCount;
     private float comboWindowTimer;
+    private float nextBasicAttackTime;   // per-swing 0.2s gate
+    private float basicAttackLockoutUntil; // 1.5s "enemy gets to fight back" window after a dropped/finished combo
 
     private float nextQTime, nextETime, nextRTime, nextTTime;
 
@@ -109,7 +134,7 @@ public class PlayerCombat : MonoBehaviour
             comboWindowTimer -= Time.deltaTime;
             if (comboWindowTimer <= 0f || !comboTarget.IsAvailableForCombo)
             {
-                EndCombo();
+                EndComboWithLockout(); // didn't follow up in time — combo drops, enemy gets a breather
             }
         }
 
@@ -157,6 +182,11 @@ public class PlayerCombat : MonoBehaviour
 
     private void TryBasicAttack()
     {
+        if (Time.time < basicAttackLockoutUntil) return; // recovering from a dropped/finished combo
+        if (Time.time < nextBasicAttackTime) return;      // per-swing cooldown, stops mashing
+
+        nextBasicAttackTime = Time.time + attackCooldown;
+
         if (comboTarget == null)
         {
             // No combo running yet — this swing has to land to start one.
@@ -182,6 +212,7 @@ public class PlayerCombat : MonoBehaviour
             : Vector2.zero; // mid-combo hits keep the target in place so the chain can continue
 
         target.ApplyHit(new HitInfo(basicAttackDamage, comboStunDuration, knockback, gameObject));
+        SpawnHitParticles(target.transform.position, isFinisher);
 
         comboTarget = target;
         comboCount++;
@@ -189,7 +220,16 @@ public class PlayerCombat : MonoBehaviour
 
         if (isFinisher)
         {
-            EndCombo();
+            EndComboWithLockout(); // 4th hit — same breather the enemy gets from a dropped combo
+        }
+    }
+
+    private void SpawnHitParticles(Vector3 position, bool isFinisher)
+    {
+        GameObject prefab = isFinisher ? finisherHitParticlePrefab : basicHitParticlePrefab;
+        if (prefab != null)
+        {
+            Instantiate(prefab, position, Quaternion.identity);
         }
     }
 
@@ -198,6 +238,13 @@ public class PlayerCombat : MonoBehaviour
         comboTarget = null;
         comboCount = 0;
         comboWindowTimer = 0f;
+    }
+
+    /// <summary>Ends the combo and starts the 1.5s window before another basic attack can be thrown.</summary>
+    private void EndComboWithLockout()
+    {
+        EndCombo();
+        basicAttackLockoutUntil = Time.time + comboEndLockout;
     }
 
     // ---------------- Q: Dash Grab ----------------
@@ -293,18 +340,58 @@ public class PlayerCombat : MonoBehaviour
 
         yield return new WaitForSeconds(knockdownWindup);
 
-        CombatTarget target = FindTargetInRange(knockdownRange);
-        if (target != null)
+        if (knockdownHitboxPrefab != null)
         {
-            target.ApplyHit(new HitInfo(knockdownDamage, knockdownDuration, Vector2.zero, gameObject, causesKnockdown: true));
+            Vector2 aimDir = GetAimDirection();
+            Vector2 spawnPos = OriginPos + aimDir * knockdownSpawnDistance;
+            float angle = Mathf.Atan2(aimDir.y, aimDir.x) * Mathf.Rad2Deg;
 
-            comboTarget = target;
-            comboCount = Mathf.Max(comboCount, 1);
-            comboWindowTimer = comboWindow;
+            GameObject hitboxObj = Instantiate(knockdownHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+            MeleeHitbox hitbox = hitboxObj.GetComponent<MeleeHitbox>();
+            if (hitbox != null)
+            {
+                hitbox.Initialize(enemyLayer, knockdownDamage, knockdownDuration, knockdownKnockbackForce,
+                    gameObject, aimDir, OnKnockdownConnect, causesKnockdown: true);
+            }
         }
+
+        yield return new WaitForSeconds(knockdownRecovery);
 
         fightingController.MovementLocked = false;
         isBusy = false;
+    }
+
+    private void OnKnockdownConnect(CombatTarget target)
+    {
+        comboTarget = target;
+        comboCount = Mathf.Max(comboCount, 1);
+        comboWindowTimer = comboWindow;
+
+        if (knockdownHitParticlePrefab != null)
+        {
+            Instantiate(knockdownHitParticlePrefab, target.transform.position, Quaternion.identity);
+        }
+
+        StartCoroutine(GroundSlamRoutine(target));
+    }
+
+    /// <summary>
+    /// Waits for the enemy's knockdown-sink to roughly finish, then raycasts straight
+    /// down from its position to find the ground and plays the slam effect there —
+    /// so the particle lands on the floor even on uneven terrain, rather than being
+    /// hard-coded to a fixed Y position.
+    /// </summary>
+    private IEnumerator GroundSlamRoutine(CombatTarget target)
+    {
+        yield return new WaitForSeconds(groundSlamDelay);
+
+        if (target == null || groundSlamParticlePrefab == null) yield break;
+
+        Vector2 origin = target.transform.position;
+        RaycastHit2D hit = Physics2D.Raycast(origin, Vector2.down, groundSlamRayDistance, groundLayer);
+        Vector3 groundPos = hit.collider != null ? (Vector3)hit.point : target.transform.position;
+
+        Instantiate(groundSlamParticlePrefab, groundPos, Quaternion.identity);
     }
 
     // ---------------- T: Combo Continuer ----------------

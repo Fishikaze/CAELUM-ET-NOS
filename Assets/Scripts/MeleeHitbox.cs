@@ -1,7 +1,8 @@
 using UnityEngine;
 
 /// <summary>
-/// Lives on the E "heavy kick" hitbox prefab. Expected prefab setup:
+/// Lives on a melee hitbox prefab — used by both E (heavy kick) and R (knockdown).
+/// Expected prefab setup:
 ///   - A Collider2D (BoxCollider2D works well) with "Is Trigger" checked —
 ///     this script forces it on anyway in Initialize().
 ///   - Whatever Animator/Animation/particle setup plays your swing effect.
@@ -27,6 +28,7 @@ public class MeleeHitbox : MonoBehaviour
     private float knockbackForce;
     private GameObject source;
     private Vector2 direction = Vector2.right;
+    private bool causesKnockdown;
     private System.Action<CombatTarget> onHit;
 
     private Collider2D col;
@@ -34,7 +36,7 @@ public class MeleeHitbox : MonoBehaviour
 
     /// <summary>Call immediately after Instantiate. direction should already be normalized (e.g. aimed at the mouse).</summary>
     public void Initialize(LayerMask targetLayer, float damage, float stunDuration, float knockbackForce,
-        GameObject source, Vector2 direction, System.Action<CombatTarget> onHit = null)
+        GameObject source, Vector2 direction, System.Action<CombatTarget> onHit = null, bool causesKnockdown = false)
     {
         this.targetLayer = targetLayer;
         this.damage = damage;
@@ -43,6 +45,7 @@ public class MeleeHitbox : MonoBehaviour
         this.source = source;
         this.direction = direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector2.right;
         this.onHit = onHit;
+        this.causesKnockdown = causesKnockdown;
 
         col = GetComponent<Collider2D>();
         col.isTrigger = true;
@@ -65,7 +68,7 @@ public class MeleeHitbox : MonoBehaviour
         if (col != null) col.enabled = false; // one hit per swing, even if it lingers near multiple enemies
 
         Vector2 knockback = direction * knockbackForce;
-        target.ApplyHit(new HitInfo(damage, stunDuration, knockback, source));
+        target.ApplyHit(new HitInfo(damage, stunDuration, knockback, source, causesKnockdown));
 
         HitStop.Trigger(hitStopDuration);
         onHit?.Invoke(target);
