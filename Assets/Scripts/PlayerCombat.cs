@@ -50,10 +50,13 @@ public class PlayerCombat : MonoBehaviour
     public float dashCooldown = 1.2f;
 
     [Header("E — Heavy Kick")]
+    [Tooltip("Prefab with a Collider2D + MeleeHitbox component, plus whatever Animator/VFX plays your swing.")]
+    public GameObject heavyKickHitboxPrefab;
     public float heavyKickWindup = 0.15f;
-    public float heavyKickRange = 1.2f;
+    public float heavyKickSpawnDistance = 0.8f; // how far from hitOrigin, along the aim direction, the hitbox spawns
+    public float heavyKickRecovery = 0.1f;      // control returns this long after the hitbox is thrown
     public float heavyKickDamage = 16f;
-    public Vector2 heavyKickKnockback = new Vector2(9f, 6f);
+    public float heavyKickKnockbackForce = 10f; // direction comes from the aim toward the mouse, not FacingSign
     public float heavyKickCooldown = 1.5f;
 
     [Header("R — Knockdown")]
@@ -124,6 +127,24 @@ public class PlayerCombat : MonoBehaviour
 
     private float FacingSign => fightingController.FacingSign;
     private Vector2 OriginPos => hitOrigin != null ? (Vector2)hitOrigin.position : (Vector2)transform.position;
+
+    /// <summary>
+    /// Direction from OriginPos toward the mouse cursor in world space, used to aim E.
+    /// Assumes an orthographic camera looking straight down the Z axis and the
+    /// player sitting at Z = 0 — standard for a 2D side-scroller. Falls back to
+    /// FacingSign if there's no camera or the cursor is exactly on top of the player.
+    /// </summary>
+    private Vector2 GetAimDirection()
+    {
+        if (Camera.main == null) return new Vector2(FacingSign, 0f);
+
+        Vector3 mouseScreen = Input.mousePosition;
+        mouseScreen.z = -Camera.main.transform.position.z;
+        Vector3 mouseWorld = Camera.main.ScreenToWorldPoint(mouseScreen);
+
+        Vector2 dir = (Vector2)mouseWorld - OriginPos;
+        return dir.sqrMagnitude > 0.0001f ? dir.normalized : new Vector2(FacingSign, 0f);
+    }
 
     private CombatTarget FindTargetInRange(float range)
     {
@@ -236,16 +257,30 @@ public class PlayerCombat : MonoBehaviour
 
         yield return new WaitForSeconds(heavyKickWindup);
 
-        CombatTarget target = FindTargetInRange(heavyKickRange);
-        if (target != null)
+        if (heavyKickHitboxPrefab != null)
         {
-            Vector2 knockback = new Vector2(heavyKickKnockback.x * FacingSign, heavyKickKnockback.y);
-            target.ApplyHit(new HitInfo(heavyKickDamage, comboStunDuration, knockback, gameObject));
-            EndCombo(); // heavy kick launches — treat it as a combo ender
+            Vector2 aimDir = GetAimDirection();
+            Vector2 spawnPos = OriginPos + aimDir * heavyKickSpawnDistance;
+            float angle = Mathf.Atan2(aimDir.y, aimDir.x) * Mathf.Rad2Deg;
+
+            GameObject hitboxObj = Instantiate(heavyKickHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+            MeleeHitbox hitbox = hitboxObj.GetComponent<MeleeHitbox>();
+            if (hitbox != null)
+            {
+                hitbox.Initialize(enemyLayer, heavyKickDamage, comboStunDuration, heavyKickKnockbackForce,
+                    gameObject, aimDir, OnHeavyKickConnect);
+            }
         }
+
+        yield return new WaitForSeconds(heavyKickRecovery);
 
         fightingController.MovementLocked = false;
         isBusy = false;
+    }
+
+    private void OnHeavyKickConnect(CombatTarget target)
+    {
+        EndCombo(); // heavy kick launches — treat it as a combo ender
     }
 
     // ---------------- R: Knockdown ----------------

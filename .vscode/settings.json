@@ -56,5 +56,5 @@
         "temp/": true,
         "Temp/": true
     },
-    "dotnet.defaultSolution": "CAELUM ET NOS.sln"
+    "dotnet.defaultSolution": "CAELUM-ET-NOS.sln"
 }
