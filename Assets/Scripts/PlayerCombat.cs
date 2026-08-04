@@ -40,9 +40,12 @@ using UnityEngine;
 ///     horizontal axis (down -> up). Ends the combo.
 ///
 ///   ; — Disrespectful kick (was T)
-///   - Only usable on a target you just tech-grabbed with F. Long charge-up,
-///     cancellable either by getting hit or by pressing ; again. On
-///     completion: heavy damage, big knockback.
+///   - Only usable on a target you just tech-grabbed with F. First press:
+///     a boot prefab stomps down in front of the player (short cancellable
+///     windup, like the grab). If it connects, a distinct floor-impact
+///     particle plays and the boot sprite fades out. Second ; press within
+///     a follow-up window: another boot kick, this time swept in the
+///     player's facing direction — a long-distance punt with extra damage.
 ///
 ///   F — Tech grab
 ///   - Startup window that's cancelled if you get hit during it. On success,
@@ -167,10 +170,27 @@ public class PlayerCombat : MonoBehaviour
     [Tooltip("How long after a successful grab the ; disrespect kick remains available.")]
     public float grabWindowForDisrespect = 2f;
 
-    [Header("; — Disrespectful Kick (grab punish only)")]
-    public float disrespectWindup = 1.2f;
-    public float disrespectDamage = 25f;
-    public float disrespectKnockback = 8f;
+    [Header("; — Disrespectful Kick, stage 1: Stomp")]
+    [Tooltip("Boot prefab — needs a Collider2D + MeleeHitbox, just like slamHitboxPrefab/kickHitboxPrefab.")]
+    public GameObject bootPrefab;
+    public float stompWindup = 0.5f;
+    public float stompSpawnDistance = 0.5f;
+    public float stompRecovery = 0.2f;
+    public float stompDamage = 10f;
+    public float stompStunDuration = 0.6f;
+    [Tooltip("Distinct floor-impact VFX — only spawned if the stomp actually connects with an enemy.")]
+    public GameObject stompFloorParticlePrefab;
+    [Tooltip("How long the boot sprite takes to fade out after each kick (stomp or punt).")]
+    public float bootFadeDuration = 0.3f;
+
+    [Header("; — Disrespectful Kick, stage 2: Punt (2nd press, facing direction)")]
+    [Tooltip("Window after a successful stomp during which pressing ; again triggers the punt instead of starting a new stomp.")]
+    public float puntFollowupWindow = 1.2f;
+    public float puntWindup = 0.15f;
+    public float puntSpawnDistance = 0.7f;
+    public float puntRecovery = 0.25f;
+    public float puntDamage = 20f;
+    public float puntKnockback = 16f;
 
     private Rigidbody2D rb;
     private CombatTarget selfTarget;
@@ -198,8 +218,11 @@ public class PlayerCombat : MonoBehaviour
     private float nextGrabTime;
     private CombatTarget grabbedTarget;
     private float grabbedTargetExpiresAt;
-    private bool isChargingDisrespect;
-    private bool cancelDisrespectRequested;
+    private bool isChargingStomp;
+    private bool cancelStompRequested;
+    private int disrespectStage; // 0 = idle, 1 = stomp landed, waiting on punt follow-up
+    private CombatTarget disrespectTarget;
+    private float puntDeadline;
 
     private void Awake()
     {
@@ -216,6 +239,9 @@ public class PlayerCombat : MonoBehaviour
         EndCombo();
         grabbedTarget = null;
         kickStage = 0;
+        disrespectStage = 0;
+        disrespectTarget = null;
+        isChargingStomp = false;
     }
 
     private void Update()
@@ -269,6 +295,28 @@ public class PlayerCombat : MonoBehaviour
             if (Input.GetKeyDown(SLAM_KEY))
             {
                 Debug.Log("[Slam] key pressed but ignored — isBusy=" + isBusy + ", CurrentState=" + selfTarget.CurrentState);
+            }
+            if (Input.GetKeyDown(DISRESPECT_KEY))
+            {
+                // StompKick() sets isBusy = true for its entire windup, so the normal
+                // dispatch below (TryDisrespectKick()) never runs while charging — the
+                // "press ; again to cancel" path was unreachable from there. Handle the
+                // cancel here instead, before the busy-gate return, so a 2nd press during
+                // the windup still lands. Anything else (a fresh stomp, or landing the
+                // punt) still has to wait for isBusy to clear, same as before.
+                if (isChargingStomp)
+                {
+                    cancelStompRequested = true;
+                    Debug.Log("[Disrespect] stomp windup cancelled by 2nd press");
+                }
+                else
+                {
+                    Debug.Log("[Disrespect] key pressed but ignored — isBusy=" + isBusy + ", CurrentState=" + selfTarget.CurrentState);
+                }
+            }
+            if (Input.GetKeyDown(GRAB_KEY))
+            {
+                Debug.Log("[Grab] key pressed but ignored — isBusy=" + isBusy + ", CurrentState=" + selfTarget.CurrentState);
             }
             return; // can't start a new top-level action while dashing/attacking/stunned
         }
@@ -644,10 +692,18 @@ public class PlayerCombat : MonoBehaviour
         }
         selfTarget.OnHit -= cancelHandler;
 
-        if (!cancelled)
+        if (cancelled)
+        {
+            Debug.Log("[Grab] cancelled — player was hit during windup");
+        }
+        else
         {
             CombatTarget target = FindTargetInRange(grabRange);
-            if (target != null)
+            if (target == null)
+            {
+                Debug.Log("[Grab] windup finished but no target found in range " + grabRange);
+            }
+            else
             {
                 Vector2 frontPos = OriginPos + FacingDir * grabPullDistance;
                 target.transform.position = frontPos;
@@ -658,6 +714,7 @@ public class PlayerCombat : MonoBehaviour
 
                 grabbedTarget = target;
                 grabbedTargetExpiresAt = Time.time + grabWindowForDisrespect;
+                Debug.Log("[Grab] success — grabbedTarget set, expires in " + grabWindowForDisrespect + "s");
             }
         }
 
@@ -665,47 +722,83 @@ public class PlayerCombat : MonoBehaviour
         isBusy = false;
     }
 
-    // ---------------- ; : Disrespectful Kick (grab punish) ----------------
+    // ---------------- ; : Disrespectful Kick (grab punish, stomp -> punt) ----------------
 
     private void TryDisrespectKick()
     {
-        if (isChargingDisrespect)
+        // NOTE: the "2nd press during windup cancels the stomp" case is now handled
+        // directly in Update()'s isBusy-gated block, since isChargingStomp is only
+        // ever true while isBusy is also true — this function can't be reached then.
+
+        if (disrespectStage == 1)
         {
-            cancelDisrespectRequested = true; // pressing ; again voluntarily cancels the charge
+            if (Time.time > puntDeadline || disrespectTarget == null)
+            {
+                Debug.Log("[Disrespect] punt window missed (deadline=" + puntDeadline + ", now=" + Time.time + ", target=" + disrespectTarget + ") — resetting to stage 0");
+                disrespectStage = 0;
+                disrespectTarget = null;
+                return;
+            }
+            Debug.Log("[Disrespect] firing punt");
+            StartCoroutine(PuntKick(disrespectTarget));
             return;
         }
 
-        if (grabbedTarget == null) return;
-        StartCoroutine(DisrespectKick(grabbedTarget));
+        if (grabbedTarget == null)
+        {
+            Debug.Log("[Disrespect] blocked: no grabbedTarget — land a successful F grab first");
+            return;
+        }
+
+        Debug.Log("[Disrespect] firing stomp on " + grabbedTarget.name);
+        StartCoroutine(StompKick(grabbedTarget));
     }
 
-    private IEnumerator DisrespectKick(CombatTarget target)
+    private IEnumerator StompKick(CombatTarget target)
     {
         isBusy = true;
         fightingController.MovementLocked = true;
-        isChargingDisrespect = true;
-        cancelDisrespectRequested = false;
+        isChargingStomp = true;
+        cancelStompRequested = false;
 
         bool cancelledByHit = false;
         System.Action<HitInfo> cancelHandler = _ => cancelledByHit = true;
         selfTarget.OnHit += cancelHandler;
 
         float t = 0f;
-        while (t < disrespectWindup)
+        while (t < stompWindup)
         {
-            if (cancelledByHit || cancelDisrespectRequested) break;
+            if (cancelledByHit || cancelStompRequested) break;
             t += Time.deltaTime;
             yield return null;
         }
         selfTarget.OnHit -= cancelHandler;
-        isChargingDisrespect = false;
+        isChargingStomp = false;
 
-        bool wasCancelled = cancelledByHit || cancelDisrespectRequested;
+        bool wasCancelled = cancelledByHit || cancelStompRequested;
 
-        if (!wasCancelled && target != null)
+        if (wasCancelled)
         {
-            Vector2 knockback = new Vector2(disrespectKnockback * FacingSign, 0f);
-            target.ApplyHit(new HitInfo(disrespectDamage, 0f, knockback, gameObject));
+            Debug.Log("[Disrespect] stomp cancelled (hit=" + cancelledByHit + ", requested=" + cancelStompRequested + ")");
+        }
+        else
+        {
+            if (bootPrefab == null)
+            {
+                Debug.Log("[Disrespect] bootPrefab is not assigned in the Inspector — nothing will spawn");
+            }
+            SpawnBootKick(stompDamage, stompStunDuration, knockbackForce: 0f, causesKnockdown: false,
+                onConnect: hitTarget => OnStompConnect(hitTarget));
+
+            yield return new WaitForSeconds(stompRecovery);
+
+            if (target != null)
+            {
+                disrespectTarget = target;
+                disrespectStage = 1;
+                puntDeadline = Time.time + puntFollowupWindow;
+                Debug.Log("[Disrespect] stomp resolved — punt window open for " + puntFollowupWindow + "s");
+            }
         }
 
         if (target == grabbedTarget)
@@ -715,6 +808,85 @@ public class PlayerCombat : MonoBehaviour
 
         fightingController.MovementLocked = false;
         isBusy = false;
+    }
+
+    private void OnStompConnect(CombatTarget target)
+    {
+        // Distinct floor-impact VFX — only plays if the stomp actually connected.
+        if (stompFloorParticlePrefab != null)
+        {
+            Instantiate(stompFloorParticlePrefab, target.transform.position, Quaternion.identity);
+        }
+    }
+
+    private IEnumerator PuntKick(CombatTarget target)
+    {
+        isBusy = true;
+        fightingController.MovementLocked = true;
+        disrespectStage = 0;
+        disrespectTarget = null;
+
+        yield return new WaitForSeconds(puntWindup);
+
+        SpawnBootKick(puntDamage, stunDuration: 0f, knockbackForce: puntKnockback, causesKnockdown: false, onConnect: null);
+
+        yield return new WaitForSeconds(puntRecovery);
+
+        fightingController.MovementLocked = false;
+        isBusy = false;
+    }
+
+    /// <summary>
+    /// Spawns the boot prefab in front of the player, wires it up as a normal
+    /// MeleeHitbox swing (facing-direction only — no mouse aim), and fades the
+    /// sprite out afterward regardless of whether it connected.
+    /// </summary>
+    private void SpawnBootKick(float damage, float stunDuration, float knockbackForce, bool causesKnockdown, System.Action<CombatTarget> onConnect)
+    {
+        if (bootPrefab == null) return;
+
+        Vector2 spawnPos = OriginPos + FacingDir * stompSpawnDistance;
+        float angle = FacingSign >= 0f ? 0f : 180f;
+
+        GameObject bootObj = Instantiate(bootPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+
+        MeleeHitbox hitbox = bootObj.GetComponent<MeleeHitbox>();
+        if (hitbox != null)
+        {
+            // We handle this boot's lifetime ourselves via the fade coroutine below,
+            // so give MeleeHitbox's own auto-destroy plenty of headroom instead of
+            // fighting over which Destroy() call wins.
+            hitbox.selfDestructTime = bootFadeDuration + 1f;
+            hitbox.Initialize(enemyLayer, damage, stunDuration, knockbackForce, gameObject, FacingDir,
+                onConnect, causesKnockdown);
+        }
+        else
+        {
+            Debug.Log("[Disrespect] bootPrefab has no MeleeHitbox component — it will spawn but never register a hit");
+        }
+
+        StartCoroutine(FadeAndDestroyBoot(bootObj));
+    }
+
+    private IEnumerator FadeAndDestroyBoot(GameObject boot)
+    {
+        SpriteRenderer sr = boot != null ? boot.GetComponentInChildren<SpriteRenderer>() : null;
+        Color startColor = sr != null ? sr.color : Color.white;
+
+        float t = 0f;
+        while (t < bootFadeDuration)
+        {
+            if (boot == null) yield break;
+            t += Time.deltaTime;
+            if (sr != null)
+            {
+                float a = Mathf.Lerp(startColor.a, 0f, t / bootFadeDuration);
+                sr.color = new Color(startColor.r, startColor.g, startColor.b, a);
+            }
+            yield return null;
+        }
+
+        if (boot != null) Destroy(boot);
     }
 
 #if UNITY_EDITOR

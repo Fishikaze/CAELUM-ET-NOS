@@ -15,7 +15,7 @@ public class PlayerModeController : MonoBehaviour
     public enum Mode { Platforming, Fighting }
     public Mode CurrentMode { get; private set; } = Mode.Platforming;
 
-    public KeyCode swapKey = KeyCode.F;
+    public KeyCode swapKey = KeyCode.Q;
 
     private PlatformingController platforming;
     private FightingController fighting;
