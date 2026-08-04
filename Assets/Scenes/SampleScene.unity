@@ -420,8 +420,8 @@ Transform:
   m_GameObject: {fileID: 800526094}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.1902, y: -4.9822, z: 0}
-  m_LocalScale: {x: 25.596027, y: 3.9332519, z: 1}
+  m_LocalPosition: {x: 12.8943, y: -5.4448, z: 0}
+  m_LocalScale: {x: 102.24579, y: 4.858797, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -548,7 +548,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1172201536}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 27e7ce1695019c540889d887b4726d3f, type: 3}
   m_Name: 
@@ -637,7 +637,7 @@ Rigidbody2D:
   m_Interpolate: 0
   m_SleepingMode: 1
   m_CollisionDetection: 0
-  m_Constraints: 5
+  m_Constraints: 4
 --- !u!4 &1172201542
 Transform:
   m_ObjectHideFlags: 0
@@ -1116,7 +1116,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: deb7030f7629aa249b6e136a6dd4c593, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  swapKey: 102
+  swapKey: 113
 --- !u!114 &1993273238
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1160,19 +1160,19 @@ MonoBehaviour:
   kickSpawnDistance: 0.8
   kick1Damage: 6
   kick1Knockback: 3
-  kick1Recovery: 0.4
+  kick1Recovery: 0.3
   kickFollowupWindow: 0.8
   kick2Damage: 10
   kick2Knockback: 8
-  kick2Stun: 0.4
-  kick2Recovery: 0.3
+  kick2Stun: 0.7
+  kick2Recovery: 0.6
   kickCooldown: 0.2
   forwardKickDashDistance: 2.5
   forwardKickDashDuration: 0.12
   forwardKickDamage: 9
   forwardKickKnockback: 4
-  forwardKickStun: 0.7
-  slamHitboxPrefab: {fileID: 1503881324038547460, guid: bd7235af053873b4e857c03fb623b622, type: 3}
+  forwardKickStun: 1
+  slamHitboxPrefab: {fileID: 1545514072406107939, guid: 2c6a04c2e99a9e142b05049f303dbec4, type: 3}
   slamRange: 3
   slamWindup: 0.2
   slamSpawnDistance: 0.7
@@ -1182,7 +1182,7 @@ MonoBehaviour:
   slamStunDuration: 1.4
   slamKnockback: {x: 2, y: -6}
   knockdownHitParticlePrefab: {fileID: 2487959522774701007, guid: 53a53ae45a0ebbb45af51398ba276cdf, type: 3}
-  groundSlamParticlePrefab: {fileID: 1545514072406107939, guid: 2c6a04c2e99a9e142b05049f303dbec4, type: 3}
+  groundSlamParticlePrefab: {fileID: 1545514072406107939, guid: a5dccd115f509264ba0afb0b4835ced6, type: 3}
   groundSlamDelay: 0.1
   groundSlamRayDistance: 5
   grabWindup: 0.3
@@ -1191,9 +1191,20 @@ MonoBehaviour:
   grabKnockdownDuration: 1.6
   grabCooldown: 1.5
   grabWindowForDisrespect: 2
-  disrespectWindup: 1.2
-  disrespectDamage: 25
-  disrespectKnockback: 8
+  bootPrefab: {fileID: 5630661136117203799, guid: a5a7ea96f79fced41b22d74c9e6d2d62, type: 3}
+  stompWindup: 0.5
+  stompSpawnDistance: 0.5
+  stompRecovery: 0.2
+  stompDamage: 10
+  stompStunDuration: 0.6
+  stompFloorParticlePrefab: {fileID: 1545514072406107939, guid: a5dccd115f509264ba0afb0b4835ced6, type: 3}
+  bootFadeDuration: 0.3
+  puntFollowupWindow: 1.2
+  puntWindup: 0.15
+  puntSpawnDistance: 0.7
+  puntRecovery: 0.25
+  puntDamage: 20
+  puntKnockback: 16
 --- !u!114 &1993273239
 MonoBehaviour:
   m_ObjectHideFlags: 0
