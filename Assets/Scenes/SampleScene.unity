@@ -548,7 +548,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1172201536}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 27e7ce1695019c540889d887b4726d3f, type: 3}
   m_Name: 
@@ -637,7 +637,7 @@ Rigidbody2D:
   m_Interpolate: 0
   m_SleepingMode: 1
   m_CollisionDetection: 0
-  m_Constraints: 4
+  m_Constraints: 5
 --- !u!4 &1172201542
 Transform:
   m_ObjectHideFlags: 0
@@ -1133,6 +1133,17 @@ MonoBehaviour:
     serializedVersion: 2
     m_Bits: 8
   hitOrigin: {fileID: 0}
+  jumpForce: 8
+  groundCheckRadius: 0.2
+  groundCheckOffset: {x: 0, y: -1}
+  groundLayer:
+    serializedVersion: 2
+    m_Bits: 64
+  doubleTapWindow: 0.25
+  dashDistance: 3.5
+  dashDuration: 0.15
+  dashCooldown: 1.2
+  dashKickWindow: 0.25
   basicAttackDamage: 8
   basicAttackRange: 1
   comboStunDuration: 0.6
@@ -1141,39 +1152,48 @@ MonoBehaviour:
   comboEndLockout: 1.5
   maxComboHits: 4
   comboFinisherKnockback: {x: 10, y: 4}
+  finisherIFrameDuration: 0.3
   basicHitParticlePrefab: {fileID: 2487959522774701007, guid: 719d6ee5baa72444aad83171d6199f98, type: 3}
   finisherHitParticlePrefab: {fileID: 2487959522774701007, guid: 53a53ae45a0ebbb45af51398ba276cdf, type: 3}
-  dashDistance: 3.5
-  dashDuration: 0.15
-  dashHitCheckRadius: 0.5
-  dashGrabDamage: 10
-  dashGrabStun: 0.5
-  dashCooldown: 1.2
-  heavyKickHitboxPrefab: {fileID: 331388788053950243, guid: a778e2f81a8aa58498c41f7ee29ba4dc, type: 3}
-  heavyKickWindup: 0.15
-  heavyKickSpawnDistance: 1.22
-  heavyKickRecovery: 0.1
-  heavyKickDamage: 16
-  heavyKickKnockbackForce: 5
-  heavyKickCooldown: 1.5
-  knockdownHitboxPrefab: {fileID: 1503881324038547460, guid: bd7235af053873b4e857c03fb623b622, type: 3}
-  knockdownWindup: 0.2
-  knockdownSpawnDistance: 0.7
-  knockdownRecovery: 0.1
-  knockdownDamage: 12
-  knockdownKnockbackForce: 2
-  knockdownDuration: 3
-  knockdownCooldown: 2
+  kickHitboxPrefab: {fileID: 331388788053950243, guid: a778e2f81a8aa58498c41f7ee29ba4dc, type: 3}
+  kickRange: 1.1
+  kickSpawnDistance: 0.8
+  kick1Damage: 6
+  kick1Knockback: 3
+  kick1Recovery: 0.4
+  kickFollowupWindow: 0.8
+  kick2Damage: 10
+  kick2Knockback: 8
+  kick2Stun: 0.4
+  kick2Recovery: 0.3
+  kickCooldown: 0.2
+  forwardKickDashDistance: 2.5
+  forwardKickDashDuration: 0.12
+  forwardKickDamage: 9
+  forwardKickKnockback: 4
+  forwardKickStun: 0.7
+  slamHitboxPrefab: {fileID: 1503881324038547460, guid: bd7235af053873b4e857c03fb623b622, type: 3}
+  slamRange: 3
+  slamWindup: 0.2
+  slamSpawnDistance: 0.7
+  slamRecovery: 0.1
+  slamCooldown: 1.5
+  slamDamage: 14
+  slamStunDuration: 1.4
+  slamKnockback: {x: 2, y: -6}
   knockdownHitParticlePrefab: {fileID: 2487959522774701007, guid: 53a53ae45a0ebbb45af51398ba276cdf, type: 3}
   groundSlamParticlePrefab: {fileID: 1545514072406107939, guid: 2c6a04c2e99a9e142b05049f303dbec4, type: 3}
-  groundLayer:
-    serializedVersion: 2
-    m_Bits: 64
   groundSlamDelay: 0.1
   groundSlamRayDistance: 5
-  comboExtendRange: 1.3
-  comboExtendDamage: 10
-  comboExtendCooldown: 1
+  grabWindup: 0.3
+  grabRange: 1.2
+  grabPullDistance: 0.7
+  grabKnockdownDuration: 1.6
+  grabCooldown: 1.5
+  grabWindowForDisrespect: 2
+  disrespectWindup: 1.2
+  disrespectDamage: 25
+  disrespectKnockback: 8
 --- !u!114 &1993273239
 MonoBehaviour:
   m_ObjectHideFlags: 0

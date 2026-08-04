@@ -18,18 +18,25 @@ public class CombatTarget : MonoBehaviour
     public float CurrentHealth { get; private set; }
 
     [Header("Blocking (only meaningful if this target can block, e.g. the player)")]
-    [Tooltip("Drive this from your own input script (e.g. PlayerCombat sets it while right click is held).")]
+    [Tooltip("Drive this from your own input script (e.g. PlayerCombat sets it while block is held).")]
     public bool isBlocking = false;
     [Range(0f, 1f)] public float blockDamageReduction = 0.9f;
 
     public State CurrentState { get; private set; } = State.Normal;
     public bool IsAvailableForCombo => CurrentState == State.Stunned || CurrentState == State.Knockdown;
 
+    /// <summary>
+    /// While true, ApplyHit is a no-op (used for the brief i-frame window after
+    /// a J-combo finisher, so the enemy can't be re-comboed instantly).
+    /// </summary>
+    public bool IsInvulnerable { get; private set; }
+
     public event System.Action<HitInfo> OnHit;
     public event System.Action OnDeath;
 
     private Rigidbody2D rb;
     private float stateTimer;
+    private float invulnerabilityTimer;
 
     private void Awake()
     {
@@ -49,6 +56,15 @@ public class CombatTarget : MonoBehaviour
                 CurrentState = State.Normal;
             }
         }
+
+        if (IsInvulnerable)
+        {
+            invulnerabilityTimer -= Time.deltaTime;
+            if (invulnerabilityTimer <= 0f)
+            {
+                IsInvulnerable = false;
+            }
+        }
     }
 
     /// <summary>
@@ -58,6 +74,7 @@ public class CombatTarget : MonoBehaviour
     /// </summary>
     public bool ApplyHit(HitInfo hit)
     {
+        if (IsInvulnerable) return false; // i-frame window — hit doesn't land at all
         if (CurrentState == State.Grabbed) return false; // already locked into another interaction
 
         if (isBlocking)
@@ -96,6 +113,13 @@ public class CombatTarget : MonoBehaviour
     {
         CurrentState = state;
         stateTimer = duration;
+    }
+
+    /// <summary>Makes this target immune to ApplyHit for the given duration.</summary>
+    public void SetInvulnerable(float duration)
+    {
+        IsInvulnerable = true;
+        invulnerabilityTimer = duration;
     }
 
     public void ForceNormal()

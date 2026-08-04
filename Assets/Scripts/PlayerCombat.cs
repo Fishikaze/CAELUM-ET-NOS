@@ -2,21 +2,57 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// Fighting-mode ability set:
-///   - Basic attack (left click): landing one hit opens a combo that lets you
-///     land up to 3 more basic attacks while the enemy is locked in Stunned
-///     state — TSB-style stagger juggling. Each swing has its own 0.2s cooldown,
-///     and if you don't land the next hit within the combo window (or after the
-///     4th hit), you're locked out of basic attacks for 1.5s — gives the enemy
-///     room to fight back instead of getting permanently stunlocked.
-///   - Q: short dash toward facing direction. Connects with an enemy along the
-///     way -> grabs them and lands one guaranteed hit, opening a combo.
-///   - E: heavy kick. Slower windup, big damage + knockback, combo finisher.
-///   - R: knockdown. Puts the enemy into Knockdown state (can't act).
-///   - T: combo continuer. Only connects against a Knockdown target — wakes
-///     them into Stunned so basic attacks can keep chaining off it.
-///   - Right click (held): block. Reduces/negates incoming damage and stun
-///     via CombatTarget.isBlocking, set every frame below.
+/// Fighting-mode ability set (mouse-free, WASD/JKL;F scheme):
+///
+///   Movement
+///   - A / D: move left / right (handled by FightingController; this script
+///     only reacts to A/D for dash detection).
+///   - Double-tap A or D: short directional dash. After the dash ends you
+///     can't dash again for a short cooldown, but you CAN attack immediately.
+///   - W / S: combo direction modifiers — held alongside L to pick a slam
+///     variant (see below).
+///   - Space: jump (grounded only).
+///
+///   J — Light attack (was Q)
+///   - Up to 4 hits in a stagger chain, TSB-style. The 4th (finisher) hit
+///     knocks the enemy back a short distance and gives them a brief
+///     i-frame window (CombatTarget.SetInvulnerable) instead of the old
+///     pure "player lockout" — the enemy is untouchable for a beat rather
+///     than just being fought-back-able.
+///
+///   K — Kick / heavy attack (was E)
+///   - Two-stage: first kick lands with a small knockback and NO stun, so
+///     the enemy can be knocked just out of range of (or fight back during)
+///     the second kick. A short recovery after hit 1 stops K from being
+///     mashed. Land the second kick within the follow-up window for a
+///     bigger knockback + short stun.
+///   - Dash + K (press K within a brief window right after a directional
+///     dash ends): forward kick — dash forward, immediately follow with a
+///     stunning kick. Blockable (goes through normal CombatTarget.ApplyHit).
+///
+///   L — Slam (was R)
+///   - Does nothing pressed alone. Only fires while held together with W
+///     (uppercut) or S (ground slam), and only while a combo target is
+///     active (mid-J/K chain, target still Stunned/Knockdown-available).
+///     Spawns a real hitbox with windup/recovery, same as the old R. Ground
+///     slam knocks down + reuses the ground-slam raycast VFX; the uppercut
+///     is the identical attack with its knockback mirrored across the
+///     horizontal axis (down -> up). Ends the combo.
+///
+///   ; — Disrespectful kick (was T)
+///   - Only usable on a target you just tech-grabbed with F. Long charge-up,
+///     cancellable either by getting hit or by pressing ; again. On
+///     completion: heavy damage, big knockback.
+///
+///   F — Tech grab
+///   - Startup window that's cancelled if you get hit during it. On success,
+///     pulls the target in front of you and knocks them down — that target
+///     becomes eligible for the ; finisher for a short window afterward.
+///
+/// NOTE: FacingSign is still read from FightingController. Since aiming used
+/// to come from the mouse, FightingController's FacingSign now needs to be
+/// driven by movement input (A/D) instead — that's a change to that script,
+/// not this one.
 ///
 /// Only enabled while PlayerModeController has the player in Fighting mode.
 /// </summary>
@@ -25,87 +61,145 @@ using UnityEngine;
 [RequireComponent(typeof(FightingController))]
 public class PlayerCombat : MonoBehaviour
 {
-    // Basic attack assumed on left click since right click is taken by block.
-    // Change this if you want a different binding (e.g. KeyCode.J for a
-    // controller-style layout).
-    private const KeyCode BASIC_ATTACK_KEY = KeyCode.Mouse0;
-    private const KeyCode BLOCK_KEY = KeyCode.Mouse1;
+    // ---- Key bindings ----
+    private const KeyCode LEFT_KEY = KeyCode.A;
+    private const KeyCode RIGHT_KEY = KeyCode.D;
+    private const KeyCode COMBO_UP_KEY = KeyCode.W;
+    private const KeyCode COMBO_DOWN_KEY = KeyCode.S;
+    private const KeyCode LIGHT_ATTACK_KEY = KeyCode.J;
+    private const KeyCode KICK_KEY = KeyCode.K;
+    private const KeyCode SLAM_KEY = KeyCode.L;
+    private const KeyCode DISRESPECT_KEY = KeyCode.Semicolon;
+    private const KeyCode GRAB_KEY = KeyCode.F;
+    private const KeyCode JUMP_KEY = KeyCode.Space;
+    // ASSUMPTION: block wasn't given a new binding since it's not a mouse
+    // mechanic itself, just previously mapped to right click. Moved to
+    // Left Shift (hold) — change if you want something else.
+    private const KeyCode BLOCK_KEY = KeyCode.LeftShift;
 
     [Header("Targeting")]
     public LayerMask enemyLayer;
     [Tooltip("Empty child positioned at chest height. Hit checks originate here.")]
     public Transform hitOrigin;
 
-    [Header("Basic Attack Combo (TSB-style stagger)")]
+    [Header("Jump")]
+    public float jumpForce = 8f;
+    public float groundCheckRadius = 0.2f;
+    public Vector2 groundCheckOffset = new Vector2(0f, -1f);
+    public LayerMask groundLayer;
+
+    [Header("Dash (double-tap A/D)")]
+    public float doubleTapWindow = 0.25f;
+    public float dashDistance = 3f;
+    public float dashDuration = 0.15f;
+    public float dashCooldown = 0.8f; // time before you can dash again; attacking is NOT gated by this
+    [Tooltip("Window after a dash ends during which pressing K triggers the forward-kick instead of a normal kick.")]
+    public float dashKickWindow = 0.25f;
+
+    [Header("J — Light Attack Combo")]
     public float basicAttackDamage = 8f;
     public float basicAttackRange = 1f;
-    public float comboStunDuration = 0.6f;  // how long each hit locks the enemy
-    public float comboWindow = 0.5f;        // time allowed to land the *next* hit before the combo drops
-    public float attackCooldown = 0.2f;     // minimum time between individual basic-attack swings (stops mashing)
-    public float comboEndLockout = 1.5f;    // can't throw a basic attack for this long after a dropped combo or the 4th hit
-    public int maxComboHits = 4;            // 1 opener + 3 follow-ups, per spec
+    public float comboStunDuration = 0.6f;
+    public float comboWindow = 0.5f;
+    public float attackCooldown = 0.2f;
+    public float comboEndLockout = 1.5f;
+    public int maxComboHits = 4;
     public Vector2 comboFinisherKnockback = new Vector2(6f, 4f);
+    [Tooltip("How long the enemy is invulnerable for after the 4th J hit.")]
+    public float finisherIFrameDuration = 0.3f;
     [Tooltip("Spawned on hits 1–3 of the combo.")]
     public GameObject basicHitParticlePrefab;
     [Tooltip("Spawned on the 4th (finisher) hit instead of the basic one.")]
     public GameObject finisherHitParticlePrefab;
 
-    [Header("Q — Dash Grab")]
-    public float dashDistance = 3.5f;
-    public float dashDuration = 0.15f;
-    public float dashHitCheckRadius = 0.5f;
-    public float dashGrabDamage = 10f;
-    public float dashGrabStun = 0.5f;
-    public float dashCooldown = 1.2f;
-
-    [Header("E — Heavy Kick")]
+    [Header("K — Kick (two-stage)")]
     [Tooltip("Prefab with a Collider2D + MeleeHitbox component, plus whatever Animator/VFX plays your swing.")]
-    public GameObject heavyKickHitboxPrefab;
-    public float heavyKickWindup = 0.15f;
-    public float heavyKickSpawnDistance = 0.8f; // how far from hitOrigin, along the aim direction, the hitbox spawns
-    public float heavyKickRecovery = 0.1f;      // control returns this long after the hitbox is thrown
-    public float heavyKickDamage = 16f;
-    public float heavyKickKnockbackForce = 10f; // direction comes from the aim toward the mouse, not FacingSign
-    public float heavyKickCooldown = 1.5f;
+    public GameObject kickHitboxPrefab;
+    public float kickRange = 1.1f;
+    public float kickSpawnDistance = 0.8f;
+    public float kick1Damage = 6f;
+    public float kick1Knockback = 3f;
+    [Tooltip("Lag after the first kick — long enough to stop mashing, short enough that the enemy (un-stunned) can swing back.")]
+    public float kick1Recovery = 0.25f;
+    [Tooltip("Total time from kick 1 landing in which kick 2 must land.")]
+    public float kickFollowupWindow = 0.6f;
+    public float kick2Damage = 10f;
+    public float kick2Knockback = 8f;
+    public float kick2Stun = 0.4f;
+    public float kick2Recovery = 0.3f;
+    public float kickCooldown = 0.2f; // gate on starting a fresh kick sequence
 
-    [Header("R — Knockdown")]
-    [Tooltip("Prefab with a Collider2D + MeleeHitbox component, plus whatever Animator/VFX plays your swing.")]
-    public GameObject knockdownHitboxPrefab;
-    public float knockdownWindup = 0.2f;
-    public float knockdownSpawnDistance = 0.7f; // how far from hitOrigin, along the aim direction, the hitbox spawns
-    public float knockdownRecovery = 0.1f;      // control returns this long after the hitbox is thrown
-    public float knockdownDamage = 12f;
-    public float knockdownKnockbackForce = 2f;  // small — this move's job is the knockdown, not a big launch
-    public float knockdownDuration = 1.4f;
-    public float knockdownCooldown = 2f;
+    [Header("Dash + K — Forward Kick")]
+    public float forwardKickDashDistance = 2.5f;
+    public float forwardKickDashDuration = 0.12f;
+    public float forwardKickDamage = 9f;
+    public float forwardKickKnockback = 4f;
+    public float forwardKickStun = 0.7f;
 
-    [Header("R — Ground Slam VFX")]
-    [Tooltip("Spawned at the enemy the instant the knockdown hit connects.")]
+    [Header("L — Slam (combo-only, held W = uppercut / held S = ground slam)")]
+    [Tooltip("Prefab with a Collider2D + MeleeHitbox component, plus whatever Animator/VFX plays the swing.")]
+    public GameObject slamHitboxPrefab;
+    [Tooltip("Must be within this range of comboTarget to even start the windup.")]
+    public float slamRange = 1.3f;
+    public float slamWindup = 0.2f;
+    public float slamSpawnDistance = 0.7f;
+    public float slamRecovery = 0.1f;
+    public float slamCooldown = 1.5f;
+    public float slamDamage = 14f;
+    [Tooltip("Long stun for the uppercut; also doubles as the knockdown duration for the ground slam.")]
+    public float slamStunDuration = 1.4f;
+    [Tooltip("Ground slam's knockback (forward + down). The uppercut is the same attack with knockback.y mirrored across the horizontal axis (i.e. flipped to forward + up).")]
+    public Vector2 slamKnockback = new Vector2(2f, -6f);
+    [Tooltip("Spawned at the enemy the instant a ground-slam L connects.")]
     public GameObject knockdownHitParticlePrefab;
     [Tooltip("Spawned at the ground point once the enemy has visually gone down.")]
     public GameObject groundSlamParticlePrefab;
-    public LayerMask groundLayer;
-    [Tooltip("How long to wait after the hit before raycasting for the ground and playing the slam — line this up with the enemy's knockdown-sink time (HitReactionVisuals' knockdownSinkDepth / sinkRiseSpeed).")]
+    [Tooltip("How long to wait after the ground-slam hit before raycasting for the ground and playing the slam VFX.")]
     public float groundSlamDelay = 0.1f;
     public float groundSlamRayDistance = 5f;
 
-    [Header("T — Combo Continuer (hits a knocked-down enemy)")]
-    public float comboExtendRange = 1.3f;
-    public float comboExtendDamage = 10f;
-    public float comboExtendCooldown = 1f;
+    [Header("F — Tech Grab")]
+    public float grabWindup = 0.3f;
+    public float grabRange = 1.2f;
+    public float grabPullDistance = 0.7f;
+    public float grabKnockdownDuration = 1.6f;
+    public float grabCooldown = 1.5f;
+    [Tooltip("How long after a successful grab the ; disrespect kick remains available.")]
+    public float grabWindowForDisrespect = 2f;
+
+    [Header("; — Disrespectful Kick (grab punish only)")]
+    public float disrespectWindup = 1.2f;
+    public float disrespectDamage = 25f;
+    public float disrespectKnockback = 8f;
 
     private Rigidbody2D rb;
     private CombatTarget selfTarget;
     private FightingController fightingController;
 
-    private bool isBusy; // mid dash/windup — blocks new abilities
+    private bool isBusy; // mid dash/windup/attack sequence — blocks new top-level actions
     private CombatTarget comboTarget;
     private int comboCount;
     private float comboWindowTimer;
-    private float nextBasicAttackTime;   // per-swing 0.2s gate
-    private float basicAttackLockoutUntil; // 1.5s "enemy gets to fight back" window after a dropped/finished combo
+    private float nextBasicAttackTime;
+    private float basicAttackLockoutUntil;
 
-    private float nextQTime, nextETime, nextRTime, nextTTime;
+    private float lastATapTime = -999f;
+    private float lastDTapTime = -999f;
+    private float nextDashTime;
+    private float dashKickWindowUntil = -999f;
+
+    private int kickStage; // 0 = idle, 1 = waiting on follow-up
+    private float kickFollowupDeadline;
+    private CombatTarget kickTarget;
+    private float nextKickStartTime;
+
+    private float nextSlamTime;
+
+    private float nextGrabTime;
+    private CombatTarget grabbedTarget;
+    private float grabbedTargetExpiresAt;
+    private bool isChargingDisrespect;
+    private bool cancelDisrespectRequested;
 
     private void Awake()
     {
@@ -116,17 +210,16 @@ public class PlayerCombat : MonoBehaviour
 
     private void OnDisable()
     {
-        // Leaving fighting mode mid-action would otherwise leave movement locked forever.
         isBusy = false;
         fightingController.MovementLocked = false;
         selfTarget.isBlocking = false;
         EndCombo();
+        grabbedTarget = null;
+        kickStage = 0;
     }
 
     private void Update()
     {
-        // Block: simple hold-to-block. Only usable from a neutral state — you can't
-        // suddenly block while mid-dash or already stunned.
         selfTarget.isBlocking = Input.GetKey(BLOCK_KEY) && !isBusy && selfTarget.CurrentState == CombatTarget.State.Normal;
 
         if (comboTarget != null)
@@ -134,42 +227,62 @@ public class PlayerCombat : MonoBehaviour
             comboWindowTimer -= Time.deltaTime;
             if (comboWindowTimer <= 0f || !comboTarget.IsAvailableForCombo)
             {
-                EndComboWithLockout(); // didn't follow up in time — combo drops, enemy gets a breather
+                EndComboWithLockout();
+            }
+        }
+
+        if (grabbedTarget != null && Time.time >= grabbedTargetExpiresAt)
+        {
+            grabbedTarget = null;
+        }
+
+        // Dash double-tap detection runs even while otherwise idle-gated below,
+        // but not while already busy with something else.
+        if (!isBusy)
+        {
+            if (Input.GetKeyDown(LEFT_KEY))
+            {
+                if (Time.time - lastATapTime <= doubleTapWindow && Time.time >= nextDashTime)
+                {
+                    StartCoroutine(Dash(-1));
+                }
+                lastATapTime = Time.time;
+            }
+
+            if (Input.GetKeyDown(RIGHT_KEY))
+            {
+                if (Time.time - lastDTapTime <= doubleTapWindow && Time.time >= nextDashTime)
+                {
+                    StartCoroutine(Dash(1));
+                }
+                lastDTapTime = Time.time;
+            }
+
+            if (Input.GetKeyDown(JUMP_KEY))
+            {
+                TryJump();
             }
         }
 
         if (isBusy || selfTarget.CurrentState != CombatTarget.State.Normal)
         {
-            return; // can't start a new action while dashing/attacking/stunned
+            if (Input.GetKeyDown(SLAM_KEY))
+            {
+                Debug.Log("[Slam] key pressed but ignored — isBusy=" + isBusy + ", CurrentState=" + selfTarget.CurrentState);
+            }
+            return; // can't start a new top-level action while dashing/attacking/stunned
         }
 
-        if (Input.GetKeyDown(BASIC_ATTACK_KEY)) TryBasicAttack();
-        if (Input.GetKeyDown(KeyCode.Q) && Time.time >= nextQTime) StartCoroutine(DashGrab());
-        if (Input.GetKeyDown(KeyCode.E) && Time.time >= nextETime) StartCoroutine(HeavyKick());
-        if (Input.GetKeyDown(KeyCode.R) && Time.time >= nextRTime) StartCoroutine(Knockdown());
-        if (Input.GetKeyDown(KeyCode.T) && Time.time >= nextTTime) TryComboExtend();
+        if (Input.GetKeyDown(LIGHT_ATTACK_KEY)) TryLightAttack();
+        if (Input.GetKeyDown(KICK_KEY)) TryKick();
+        if (Input.GetKeyDown(SLAM_KEY)) TrySlam();
+        if (Input.GetKeyDown(GRAB_KEY) && Time.time >= nextGrabTime) StartCoroutine(TechGrab());
+        if (Input.GetKeyDown(DISRESPECT_KEY)) TryDisrespectKick();
     }
 
     private float FacingSign => fightingController.FacingSign;
+    private Vector2 FacingDir => new Vector2(FacingSign, 0f);
     private Vector2 OriginPos => hitOrigin != null ? (Vector2)hitOrigin.position : (Vector2)transform.position;
-
-    /// <summary>
-    /// Direction from OriginPos toward the mouse cursor in world space, used to aim E.
-    /// Assumes an orthographic camera looking straight down the Z axis and the
-    /// player sitting at Z = 0 — standard for a 2D side-scroller. Falls back to
-    /// FacingSign if there's no camera or the cursor is exactly on top of the player.
-    /// </summary>
-    private Vector2 GetAimDirection()
-    {
-        if (Camera.main == null) return new Vector2(FacingSign, 0f);
-
-        Vector3 mouseScreen = Input.mousePosition;
-        mouseScreen.z = -Camera.main.transform.position.z;
-        Vector3 mouseWorld = Camera.main.ScreenToWorldPoint(mouseScreen);
-
-        Vector2 dir = (Vector2)mouseWorld - OriginPos;
-        return dir.sqrMagnitude > 0.0001f ? dir.normalized : new Vector2(FacingSign, 0f);
-    }
 
     private CombatTarget FindTargetInRange(float range)
     {
@@ -178,25 +291,59 @@ public class PlayerCombat : MonoBehaviour
         return hit != null ? hit.GetComponent<CombatTarget>() : null;
     }
 
-    // ---------------- Basic attack + combo ----------------
+    // ---------------- Jump ----------------
 
-    private void TryBasicAttack()
+    private void TryJump()
     {
-        if (Time.time < basicAttackLockoutUntil) return; // recovering from a dropped/finished combo
-        if (Time.time < nextBasicAttackTime) return;      // per-swing cooldown, stops mashing
+        Vector2 checkPos = OriginPos + groundCheckOffset;
+        bool isGrounded = Physics2D.OverlapCircle(checkPos, groundCheckRadius, groundLayer);
+        if (!isGrounded) return;
+
+        rb.velocity = new Vector2(rb.velocity.x, jumpForce);
+    }
+
+    // ---------------- Dash (double-tap A/D) ----------------
+
+    private IEnumerator Dash(int dir)
+    {
+        isBusy = true;
+        fightingController.MovementLocked = true;
+
+        Vector2 start = rb.position;
+        Vector2 end = start + Vector2.right * dir * dashDistance;
+        float t = 0f;
+
+        while (t < dashDuration)
+        {
+            t += Time.fixedDeltaTime;
+            rb.MovePosition(Vector2.Lerp(start, end, t / dashDuration));
+            yield return new WaitForFixedUpdate();
+        }
+
+        nextDashTime = Time.time + dashCooldown;
+        dashKickWindowUntil = Time.time + dashKickWindow;
+
+        fightingController.MovementLocked = false;
+        isBusy = false; // attacking is allowed immediately — only re-dashing is gated
+    }
+
+    // ---------------- J: Light Attack Combo ----------------
+
+    private void TryLightAttack()
+    {
+        if (Time.time < basicAttackLockoutUntil) return;
+        if (Time.time < nextBasicAttackTime) return;
 
         nextBasicAttackTime = Time.time + attackCooldown;
 
         if (comboTarget == null)
         {
-            // No combo running yet — this swing has to land to start one.
             CombatTarget target = FindTargetInRange(basicAttackRange);
             if (target == null) return;
             LandComboHit(target);
             return;
         }
 
-        // Continuing an existing combo — must still be roughly in range of the same target.
         if (Vector2.Distance(OriginPos, comboTarget.transform.position) <= basicAttackRange + 0.3f)
         {
             LandComboHit(comboTarget);
@@ -209,7 +356,7 @@ public class PlayerCombat : MonoBehaviour
 
         Vector2 knockback = isFinisher
             ? new Vector2(comboFinisherKnockback.x * FacingSign, comboFinisherKnockback.y)
-            : Vector2.zero; // mid-combo hits keep the target in place so the chain can continue
+            : Vector2.zero;
 
         target.ApplyHit(new HitInfo(basicAttackDamage, comboStunDuration, knockback, gameObject));
         SpawnHitParticles(target.transform.position, isFinisher);
@@ -220,7 +367,8 @@ public class PlayerCombat : MonoBehaviour
 
         if (isFinisher)
         {
-            EndComboWithLockout(); // 4th hit — same breather the enemy gets from a dropped combo
+            target.SetInvulnerable(finisherIFrameDuration);
+            EndComboWithLockout();
         }
     }
 
@@ -240,53 +388,120 @@ public class PlayerCombat : MonoBehaviour
         comboWindowTimer = 0f;
     }
 
-    /// <summary>Ends the combo and starts the 1.5s window before another basic attack can be thrown.</summary>
     private void EndComboWithLockout()
     {
         EndCombo();
         basicAttackLockoutUntil = Time.time + comboEndLockout;
     }
 
-    // ---------------- Q: Dash Grab ----------------
+    // ---------------- K: Kick (two-stage) / Dash+K forward kick ----------------
 
-    private IEnumerator DashGrab()
+    private void TryKick()
+    {
+        if (Time.time <= dashKickWindowUntil)
+        {
+            StartCoroutine(ForwardKick());
+            return;
+        }
+
+        if (kickStage == 0)
+        {
+            if (Time.time < nextKickStartTime) return;
+            CombatTarget target = FindTargetInRange(kickRange);
+            if (target == null) return;
+            StartCoroutine(KickHit(target, isSecondHit: false));
+            return;
+        }
+
+        // kickStage == 1: attempting the follow-up
+        if (Time.time > kickFollowupDeadline || kickTarget == null)
+        {
+            kickStage = 0;
+            return; // window missed; next press starts a fresh sequence
+        }
+
+        if (Vector2.Distance(OriginPos, kickTarget.transform.position) <= kickRange + 0.3f)
+        {
+            StartCoroutine(KickHit(kickTarget, isSecondHit: true));
+        }
+        // else: whiffed the follow-up (enemy knocked out of range) — window just ticks down and expires
+    }
+
+    private IEnumerator KickHit(CombatTarget target, bool isSecondHit)
     {
         isBusy = true;
         fightingController.MovementLocked = true;
-        nextQTime = Time.time + dashCooldown;
+
+        if (kickHitboxPrefab != null)
+        {
+            Vector2 spawnPos = OriginPos + FacingDir * kickSpawnDistance;
+            float angle = FacingSign >= 0f ? 0f : 180f;
+            GameObject hitboxObj = Instantiate(kickHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+            MeleeHitbox hitbox = hitboxObj.GetComponent<MeleeHitbox>();
+            if (hitbox != null)
+            {
+                float damage = isSecondHit ? kick2Damage : kick1Damage;
+                float stun = isSecondHit ? kick2Stun : 0f; // hit 1 does NOT stun — enemy can fight back before hit 2
+                float knockback = isSecondHit ? kick2Knockback : kick1Knockback;
+
+                hitbox.Initialize(enemyLayer, damage, stun, knockback, gameObject, FacingDir,
+                    hitTarget => OnKickConnect(hitTarget, isSecondHit));
+            }
+        }
+
+        float recovery = isSecondHit ? kick2Recovery : kick1Recovery;
+        yield return new WaitForSeconds(recovery);
+
+        if (isSecondHit)
+        {
+            kickStage = 0;
+            nextKickStartTime = Time.time + kickCooldown;
+        }
+        else
+        {
+            kickStage = 1;
+            kickTarget = target;
+            kickFollowupDeadline = Time.time + kickFollowupWindow;
+        }
+
+        fightingController.MovementLocked = false;
+        isBusy = false;
+    }
+
+    private void OnKickConnect(CombatTarget target, bool isSecondHit)
+    {
+        if (isSecondHit)
+        {
+            // second kick stuns — makes it a valid combo target for L
+            comboTarget = target;
+            comboCount = Mathf.Max(comboCount, 1);
+            comboWindowTimer = comboWindow;
+        }
+    }
+
+    private IEnumerator ForwardKick()
+    {
+        isBusy = true;
+        fightingController.MovementLocked = true;
+        dashKickWindowUntil = -999f; // consume the window
 
         Vector2 start = rb.position;
-        Vector2 end = start + Vector2.right * FacingSign * dashDistance;
+        Vector2 end = start + Vector2.right * FacingSign * forwardKickDashDistance;
         float t = 0f;
-        CombatTarget grabbed = null;
-
-        while (t < dashDuration)
+        while (t < forwardKickDashDuration)
         {
             t += Time.fixedDeltaTime;
-            Vector2 nextPos = Vector2.Lerp(start, end, t / dashDuration);
-
-            // Check the swept path each step so a fast dash can't skip past a thin enemy.
-            Collider2D hit = Physics2D.OverlapCircle(nextPos, dashHitCheckRadius, enemyLayer);
-            if (hit != null)
-            {
-                grabbed = hit.GetComponent<CombatTarget>();
-                rb.MovePosition((Vector2)hit.transform.position - Vector2.right * FacingSign * 0.6f);
-                break;
-            }
-
-            rb.MovePosition(nextPos);
+            rb.MovePosition(Vector2.Lerp(start, end, t / forwardKickDashDuration));
             yield return new WaitForFixedUpdate();
         }
 
-        if (grabbed != null)
+        CombatTarget target = FindTargetInRange(kickRange);
+        if (target != null)
         {
-            grabbed.SetState(CombatTarget.State.Grabbed, 0.3f);
-            yield return new WaitForSeconds(0.15f); // brief hold before the strike lands
-
-            grabbed.ApplyHit(new HitInfo(dashGrabDamage, dashGrabStun, Vector2.zero, gameObject));
-
-            comboTarget = grabbed;
-            comboCount = 1; // the grab hit counts as the combo opener
+            Vector2 knockback = new Vector2(forwardKickKnockback * FacingSign, 0f);
+            target.ApplyHit(new HitInfo(forwardKickDamage, forwardKickStun, knockback, gameObject)); // respects block
+            comboTarget = target;
+            comboCount = Mathf.Max(comboCount, 1);
             comboWindowTimer = comboWindow;
         }
 
@@ -294,93 +509,107 @@ public class PlayerCombat : MonoBehaviour
         isBusy = false;
     }
 
-    // ---------------- E: Heavy Kick ----------------
+    // ---------------- L: Slam (combo-only, held W/S picks the variant) ----------------
 
-    private IEnumerator HeavyKick()
+    private void TrySlam()
+    {
+        // L does nothing on its own — it only fires when W or S is held at the same time.
+        bool up = Input.GetKey(COMBO_UP_KEY);
+        bool down = Input.GetKey(COMBO_DOWN_KEY);
+        if (!up && !down)
+        {
+            Debug.Log("[Slam] blocked: neither W nor S held");
+            return;
+        }
+
+        if (Time.time < nextSlamTime)
+        {
+            Debug.Log("[Slam] blocked: on cooldown for " + (nextSlamTime - Time.time) + "s more");
+            return;
+        }
+
+        if (comboTarget == null)
+        {
+            Debug.Log("[Slam] blocked: no comboTarget set — land a J hit or a second K hit first");
+            return;
+        }
+
+        if (!comboTarget.IsAvailableForCombo)
+        {
+            Debug.Log("[Slam] blocked: comboTarget exists but state is " + comboTarget.CurrentState + " (needs Stunned or Knockdown)");
+            return;
+        }
+
+        float dist = Vector2.Distance(OriginPos, comboTarget.transform.position);
+        if (dist > slamRange + 0.3f)
+        {
+            Debug.Log("[Slam] blocked: out of range (" + dist + " > " + (slamRange + 0.3f) + ")");
+            return;
+        }
+
+        // W takes priority if both happen to be held.
+        bool isUppercut = up;
+        Debug.Log("[Slam] firing — " + (isUppercut ? "uppercut" : "ground slam"));
+        StartCoroutine(SlamRoutine(comboTarget, isUppercut));
+    }
+
+    private IEnumerator SlamRoutine(CombatTarget target, bool isUppercut)
     {
         isBusy = true;
         fightingController.MovementLocked = true;
-        nextETime = Time.time + heavyKickCooldown;
+        nextSlamTime = Time.time + slamCooldown;
 
-        yield return new WaitForSeconds(heavyKickWindup);
+        yield return new WaitForSeconds(slamWindup);
 
-        if (heavyKickHitboxPrefab != null)
+        if (slamHitboxPrefab != null)
         {
-            Vector2 aimDir = GetAimDirection();
-            Vector2 spawnPos = OriginPos + aimDir * heavyKickSpawnDistance;
-            float angle = Mathf.Atan2(aimDir.y, aimDir.x) * Mathf.Rad2Deg;
+            Vector2 spawnPos = OriginPos + FacingDir * slamSpawnDistance;
+            float angle = FacingSign >= 0f ? 0f : 180f;
 
-            GameObject hitboxObj = Instantiate(heavyKickHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+            // Uppercut is the ground slam mirrored across the horizontal axis: same
+            // forward knockback, vertical component flipped (down -> up).
+            Vector2 knockback = isUppercut
+                ? new Vector2(slamKnockback.x * FacingSign, -slamKnockback.y)
+                : new Vector2(slamKnockback.x * FacingSign, slamKnockback.y);
+
+            GameObject hitboxObj = Instantiate(slamHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
             MeleeHitbox hitbox = hitboxObj.GetComponent<MeleeHitbox>();
             if (hitbox != null)
             {
-                hitbox.Initialize(enemyLayer, heavyKickDamage, comboStunDuration, heavyKickKnockbackForce,
-                    gameObject, aimDir, OnHeavyKickConnect);
+                hitbox.Initialize(enemyLayer, slamDamage, slamStunDuration, 0f, gameObject, FacingDir,
+                    hitTarget => OnSlamConnect(hitTarget, isUppercut, knockback),
+                    causesKnockdown: !isUppercut);
             }
         }
 
-        yield return new WaitForSeconds(heavyKickRecovery);
+        yield return new WaitForSeconds(slamRecovery);
 
         fightingController.MovementLocked = false;
         isBusy = false;
+        EndComboWithLockout();
     }
 
-    private void OnHeavyKickConnect(CombatTarget target)
+    private void OnSlamConnect(CombatTarget target, bool isUppercut, Vector2 knockback)
     {
-        EndCombo(); // heavy kick launches — treat it as a combo ender
-    }
-
-    // ---------------- R: Knockdown ----------------
-
-    private IEnumerator Knockdown()
-    {
-        isBusy = true;
-        fightingController.MovementLocked = true;
-        nextRTime = Time.time + knockdownCooldown;
-
-        yield return new WaitForSeconds(knockdownWindup);
-
-        if (knockdownHitboxPrefab != null)
+        // MeleeHitbox applies knockback via its own `direction * knockbackForce`, but our
+        // knockback isn't purely along the facing axis (it has a vertical component), so
+        // we set it directly here instead of relying on the hitbox's knockbackForce param.
+        Rigidbody2D targetRb = target.GetComponent<Rigidbody2D>();
+        if (targetRb != null)
         {
-            Vector2 aimDir = GetAimDirection();
-            Vector2 spawnPos = OriginPos + aimDir * knockdownSpawnDistance;
-            float angle = Mathf.Atan2(aimDir.y, aimDir.x) * Mathf.Rad2Deg;
+            targetRb.velocity = knockback;
+        }
 
-            GameObject hitboxObj = Instantiate(knockdownHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
-            MeleeHitbox hitbox = hitboxObj.GetComponent<MeleeHitbox>();
-            if (hitbox != null)
+        if (!isUppercut)
+        {
+            if (knockdownHitParticlePrefab != null)
             {
-                hitbox.Initialize(enemyLayer, knockdownDamage, knockdownDuration, knockdownKnockbackForce,
-                    gameObject, aimDir, OnKnockdownConnect, causesKnockdown: true);
+                Instantiate(knockdownHitParticlePrefab, target.transform.position, Quaternion.identity);
             }
+            StartCoroutine(GroundSlamRoutine(target));
         }
-
-        yield return new WaitForSeconds(knockdownRecovery);
-
-        fightingController.MovementLocked = false;
-        isBusy = false;
     }
 
-    private void OnKnockdownConnect(CombatTarget target)
-    {
-        comboTarget = target;
-        comboCount = Mathf.Max(comboCount, 1);
-        comboWindowTimer = comboWindow;
-
-        if (knockdownHitParticlePrefab != null)
-        {
-            Instantiate(knockdownHitParticlePrefab, target.transform.position, Quaternion.identity);
-        }
-
-        StartCoroutine(GroundSlamRoutine(target));
-    }
-
-    /// <summary>
-    /// Waits for the enemy's knockdown-sink to roughly finish, then raycasts straight
-    /// down from its position to find the ground and plays the slam effect there —
-    /// so the particle lands on the floor even on uneven terrain, rather than being
-    /// hard-coded to a fixed Y position.
-    /// </summary>
     private IEnumerator GroundSlamRoutine(CombatTarget target)
     {
         yield return new WaitForSeconds(groundSlamDelay);
@@ -394,21 +623,98 @@ public class PlayerCombat : MonoBehaviour
         Instantiate(groundSlamParticlePrefab, groundPos, Quaternion.identity);
     }
 
-    // ---------------- T: Combo Continuer ----------------
+    // ---------------- F: Tech Grab ----------------
 
-    private void TryComboExtend()
+    private IEnumerator TechGrab()
     {
-        CombatTarget target = FindTargetInRange(comboExtendRange);
-        if (target == null || target.CurrentState != CombatTarget.State.Knockdown) return;
+        isBusy = true;
+        fightingController.MovementLocked = true;
+        nextGrabTime = Time.time + grabCooldown;
 
-        nextTTime = Time.time + comboExtendCooldown;
+        bool cancelled = false;
+        System.Action<HitInfo> cancelHandler = _ => cancelled = true;
+        selfTarget.OnHit += cancelHandler;
 
-        // Wakes the enemy back into Stunned so basic attacks can keep chaining off it.
-        target.ApplyHit(new HitInfo(comboExtendDamage, comboStunDuration, Vector2.zero, gameObject));
+        float t = 0f;
+        while (t < grabWindup)
+        {
+            if (cancelled) break;
+            t += Time.deltaTime;
+            yield return null;
+        }
+        selfTarget.OnHit -= cancelHandler;
 
-        comboTarget = target;
-        comboCount = Mathf.Min(comboCount + 1, maxComboHits - 1); // leaves room for at least one more basic hit
-        comboWindowTimer = comboWindow;
+        if (!cancelled)
+        {
+            CombatTarget target = FindTargetInRange(grabRange);
+            if (target != null)
+            {
+                Vector2 frontPos = OriginPos + FacingDir * grabPullDistance;
+                target.transform.position = frontPos;
+
+                // Grabs bypass block by design — set the state directly rather than
+                // routing through ApplyHit.
+                target.SetState(CombatTarget.State.Knockdown, grabKnockdownDuration);
+
+                grabbedTarget = target;
+                grabbedTargetExpiresAt = Time.time + grabWindowForDisrespect;
+            }
+        }
+
+        fightingController.MovementLocked = false;
+        isBusy = false;
+    }
+
+    // ---------------- ; : Disrespectful Kick (grab punish) ----------------
+
+    private void TryDisrespectKick()
+    {
+        if (isChargingDisrespect)
+        {
+            cancelDisrespectRequested = true; // pressing ; again voluntarily cancels the charge
+            return;
+        }
+
+        if (grabbedTarget == null) return;
+        StartCoroutine(DisrespectKick(grabbedTarget));
+    }
+
+    private IEnumerator DisrespectKick(CombatTarget target)
+    {
+        isBusy = true;
+        fightingController.MovementLocked = true;
+        isChargingDisrespect = true;
+        cancelDisrespectRequested = false;
+
+        bool cancelledByHit = false;
+        System.Action<HitInfo> cancelHandler = _ => cancelledByHit = true;
+        selfTarget.OnHit += cancelHandler;
+
+        float t = 0f;
+        while (t < disrespectWindup)
+        {
+            if (cancelledByHit || cancelDisrespectRequested) break;
+            t += Time.deltaTime;
+            yield return null;
+        }
+        selfTarget.OnHit -= cancelHandler;
+        isChargingDisrespect = false;
+
+        bool wasCancelled = cancelledByHit || cancelDisrespectRequested;
+
+        if (!wasCancelled && target != null)
+        {
+            Vector2 knockback = new Vector2(disrespectKnockback * FacingSign, 0f);
+            target.ApplyHit(new HitInfo(disrespectDamage, 0f, knockback, gameObject));
+        }
+
+        if (target == grabbedTarget)
+        {
+            grabbedTarget = null;
+        }
+
+        fightingController.MovementLocked = false;
+        isBusy = false;
     }
 
 #if UNITY_EDITOR
@@ -417,6 +723,9 @@ public class PlayerCombat : MonoBehaviour
         if (hitOrigin == null) return;
         Gizmos.color = Color.red;
         Gizmos.DrawWireSphere(hitOrigin.position, basicAttackRange);
+
+        Gizmos.color = Color.green;
+        Gizmos.DrawWireSphere((Vector2)hitOrigin.position + groundCheckOffset, groundCheckRadius);
     }
 #endif
 }
