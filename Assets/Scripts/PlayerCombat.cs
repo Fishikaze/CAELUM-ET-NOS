@@ -138,6 +138,8 @@ public class PlayerCombat : MonoBehaviour
     public float forwardKickDamage = 9f;
     public float forwardKickKnockback = 4f;
     public float forwardKickStun = 0.7f;
+    [Tooltip("Spawned at the enemy's position on a successful connect. Separate from basicHitParticlePrefab/finisherHitParticlePrefab so the dash-kick impact can look distinct.")]
+    public GameObject forwardKickHitParticlePrefab;
 
     [Header("L — Slam (combo-only, held W = uppercut / held S = ground slam)")]
     [Tooltip("Prefab with a Collider2D + MeleeHitbox component, plus whatever Animator/VFX plays the swing.")]
@@ -174,20 +176,34 @@ public class PlayerCombat : MonoBehaviour
     [Tooltip("Boot prefab — needs a Collider2D + MeleeHitbox, just like slamHitboxPrefab/kickHitboxPrefab.")]
     public GameObject bootPrefab;
     public float stompWindup = 0.5f;
+    [Tooltip("How far in front of the player the boot's landing spot is — same convention as kickSpawnDistance/slamSpawnDistance.")]
     public float stompSpawnDistance = 0.5f;
+    [Tooltip("How high above the landing spot the boot starts before stomping down onto it.")]
+    public float stompDropHeight = 1.5f;
+    [Tooltip("How long the downward stomp motion itself takes, from drop height down to the landing spot.")]
+    public float stompDescentDuration = 0.15f;
     public float stompRecovery = 0.2f;
     public float stompDamage = 10f;
     public float stompStunDuration = 0.6f;
-    [Tooltip("Distinct floor-impact VFX — only spawned if the stomp actually connects with an enemy.")]
+    [Tooltip("Distinct floor-impact VFX — only spawned if the stomp actually connects with the grabbed enemy.")]
     public GameObject stompFloorParticlePrefab;
-    [Tooltip("How long the boot sprite takes to fade out after each kick (stomp or punt).")]
+    [Tooltip("How long the boot sprite takes to fade out after each kick (stomp or punt) — starts once the motion for that kick has finished, not on spawn.")]
     public float bootFadeDuration = 0.3f;
 
-    [Header("; — Disrespectful Kick, stage 2: Punt (2nd press, facing direction)")]
+    [Header("; — Disrespectful Kick, stage 2: Punt (2nd press, facing direction, circular kicking arc)")]
     [Tooltip("Window after a successful stomp during which pressing ; again triggers the punt instead of starting a new stomp.")]
     public float puntFollowupWindow = 1.2f;
     public float puntWindup = 0.15f;
-    public float puntSpawnDistance = 0.7f;
+    [Tooltip("Pivot-relative angle (degrees) where the arc sweep starts. 0 = straight forward (facing direction), negative = below. Mirrors automatically with facing so the swing looks the same facing either way.")]
+    public float puntArcStartAngle = -150f;
+    [Tooltip("Pivot-relative angle (degrees) where the sweep ends. Both this and the start angle are negative by default so the sweep passes through -90° (straight down) at its midpoint — a low kick through the bottom of the circle, not over the top.")]
+    public float puntArcEndAngle = -30f;
+    [Tooltip("Radius of the circular arc — fixed distance from the pivot (roughly hip height, at OriginPos) to the boot throughout the whole sweep.")]
+    public float puntArcRadius = 1f;
+    [Tooltip("How long the arc sweep itself takes, separate from puntWindup (before it) and puntRecovery (after).")]
+    public float puntSweepDuration = 0.25f;
+    [Tooltip("Stun applied on hit — needs to be nonzero (same idea as comboStunDuration on the J finisher) so the target stays locked down long enough for the knockback to actually carry them. At 0, they return to Normal almost instantly and EnemyAI's own movement immediately overwrites the knockback velocity again.")]
+    public float puntStunDuration = 0.6f;
     public float puntRecovery = 0.25f;
     public float puntDamage = 20f;
     public float puntKnockback = 16f;
@@ -379,22 +395,41 @@ public class PlayerCombat : MonoBehaviour
 
     private void TryLightAttack()
     {
-        if (Time.time < basicAttackLockoutUntil) return;
-        if (Time.time < nextBasicAttackTime) return;
+        if (Time.time < basicAttackLockoutUntil)
+        {
+            Debug.Log("[LightAttack] blocked: combo end lockout for " + (basicAttackLockoutUntil - Time.time) + "s more");
+            return;
+        }
+        if (Time.time < nextBasicAttackTime)
+        {
+            Debug.Log("[LightAttack] blocked: attack cooldown for " + (nextBasicAttackTime - Time.time) + "s more");
+            return;
+        }
 
         nextBasicAttackTime = Time.time + attackCooldown;
 
         if (comboTarget == null)
         {
             CombatTarget target = FindTargetInRange(basicAttackRange);
-            if (target == null) return;
+            if (target == null)
+            {
+                Debug.Log("[LightAttack] blocked: no target within range " + basicAttackRange + " (enemyLayer=" + enemyLayer.value + ")");
+                return;
+            }
+            Debug.Log("[LightAttack] hit 1 on " + target.name);
             LandComboHit(target);
             return;
         }
 
-        if (Vector2.Distance(OriginPos, comboTarget.transform.position) <= basicAttackRange + 0.3f)
+        float dist = Vector2.Distance(OriginPos, comboTarget.transform.position);
+        if (dist <= basicAttackRange + 0.3f)
         {
+            Debug.Log("[LightAttack] combo hit " + (comboCount + 1) + " on " + comboTarget.name);
             LandComboHit(comboTarget);
+        }
+        else
+        {
+            Debug.Log("[LightAttack] combo target out of range (" + dist + " > " + (basicAttackRange + 0.3f) + ")");
         }
     }
 
@@ -448,15 +483,25 @@ public class PlayerCombat : MonoBehaviour
     {
         if (Time.time <= dashKickWindowUntil)
         {
+            Debug.Log("[Kick] firing forward kick (dash+K window)");
             StartCoroutine(ForwardKick());
             return;
         }
 
         if (kickStage == 0)
         {
-            if (Time.time < nextKickStartTime) return;
+            if (Time.time < nextKickStartTime)
+            {
+                Debug.Log("[Kick] blocked: on cooldown for " + (nextKickStartTime - Time.time) + "s more");
+                return;
+            }
             CombatTarget target = FindTargetInRange(kickRange);
-            if (target == null) return;
+            if (target == null)
+            {
+                Debug.Log("[Kick] blocked: no target within range " + kickRange);
+                return;
+            }
+            Debug.Log("[Kick] firing kick 1 on " + target.name);
             StartCoroutine(KickHit(target, isSecondHit: false));
             return;
         }
@@ -464,15 +509,22 @@ public class PlayerCombat : MonoBehaviour
         // kickStage == 1: attempting the follow-up
         if (Time.time > kickFollowupDeadline || kickTarget == null)
         {
+            Debug.Log("[Kick] follow-up window missed (deadline=" + kickFollowupDeadline + ", now=" + Time.time + ", target=" + kickTarget + ") — resetting to a fresh sequence");
             kickStage = 0;
             return; // window missed; next press starts a fresh sequence
         }
 
-        if (Vector2.Distance(OriginPos, kickTarget.transform.position) <= kickRange + 0.3f)
+        float dist = Vector2.Distance(OriginPos, kickTarget.transform.position);
+        if (dist <= kickRange + 0.3f)
         {
+            Debug.Log("[Kick] firing kick 2 (follow-up) on " + kickTarget.name);
             StartCoroutine(KickHit(kickTarget, isSecondHit: true));
         }
-        // else: whiffed the follow-up (enemy knocked out of range) — window just ticks down and expires
+        else
+        {
+            Debug.Log("[Kick] follow-up whiffed: target out of range (" + dist + " > " + (kickRange + 0.3f) + ") — window still ticking");
+        }
+        // window just ticks down and expires if it's never landed
     }
 
     private IEnumerator KickHit(CombatTarget target, bool isSecondHit)
@@ -527,6 +579,18 @@ public class PlayerCombat : MonoBehaviour
         }
     }
 
+    private void OnForwardKickConnect(CombatTarget target)
+    {
+        if (forwardKickHitParticlePrefab != null)
+        {
+            Instantiate(forwardKickHitParticlePrefab, target.transform.position, Quaternion.identity);
+        }
+
+        comboTarget = target;
+        comboCount = Mathf.Max(comboCount, 1);
+        comboWindowTimer = comboWindow;
+    }
+
     private IEnumerator ForwardKick()
     {
         isBusy = true;
@@ -543,14 +607,25 @@ public class PlayerCombat : MonoBehaviour
             yield return new WaitForFixedUpdate();
         }
 
-        CombatTarget target = FindTargetInRange(kickRange);
-        if (target != null)
+        // Same real-hitbox pattern as K/L/; instead of an instant range check —
+        // reuses kickHitboxPrefab since this is still fundamentally a kick, just
+        // arriving off the back of a dash. Swap in a dedicated prefab here later if
+        // you want the dash-kick's swing to look different from the standing kick.
+        if (kickHitboxPrefab != null)
         {
-            Vector2 knockback = new Vector2(forwardKickKnockback * FacingSign, 0f);
-            target.ApplyHit(new HitInfo(forwardKickDamage, forwardKickStun, knockback, gameObject)); // respects block
-            comboTarget = target;
-            comboCount = Mathf.Max(comboCount, 1);
-            comboWindowTimer = comboWindow;
+            Vector2 spawnPos = OriginPos + FacingDir * kickSpawnDistance;
+            float angle = FacingSign >= 0f ? 0f : 180f;
+            GameObject hitboxObj = Instantiate(kickHitboxPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+            MeleeHitbox hitbox = hitboxObj.GetComponent<MeleeHitbox>();
+            if (hitbox != null)
+            {
+                hitbox.Initialize(enemyLayer, forwardKickDamage, forwardKickStun, forwardKickKnockback, gameObject, FacingDir,
+                    hitTarget => OnForwardKickConnect(hitTarget));
+            }
+        }
+        else
+        {
+            Debug.Log("[ForwardKick] kickHitboxPrefab is not assigned in the Inspector — nothing will spawn");
         }
 
         fightingController.MovementLocked = false;
@@ -754,7 +829,7 @@ public class PlayerCombat : MonoBehaviour
         StartCoroutine(StompKick(grabbedTarget));
     }
 
-    private IEnumerator StompKick(CombatTarget target)
+    private IEnumerator StompKick(CombatTarget expectedTarget)
     {
         isBusy = true;
         fightingController.MovementLocked = true;
@@ -787,36 +862,63 @@ public class PlayerCombat : MonoBehaviour
             {
                 Debug.Log("[Disrespect] bootPrefab is not assigned in the Inspector — nothing will spawn");
             }
-            SpawnBootKick(stompDamage, stompStunDuration, knockbackForce: 0f, causesKnockdown: false,
-                onConnect: hitTarget => OnStompConnect(hitTarget));
+
+            // Spawn up in the air above the landing spot, then drop it down onto that
+            // spot — the boot's hitbox does its own overlap detection as it descends,
+            // same as it always has, it just now arrives there instead of appearing
+            // there instantly.
+            Vector2 landingPos = OriginPos + FacingDir * stompSpawnDistance;
+            Vector2 startPos = landingPos + Vector2.up * stompDropHeight;
+
+            GameObject bootObj = SpawnBootKick(stompDamage, stompStunDuration, knockbackForce: 0f, causesKnockdown: false,
+                spawnPosition: startPos, onConnect: hitTarget => OnStompConnect(hitTarget, expectedTarget));
+            MeleeHitbox hitbox = bootObj != null ? bootObj.GetComponent<MeleeHitbox>() : null;
+
+            float descendT = 0f;
+            while (descendT < stompDescentDuration)
+            {
+                descendT += Time.deltaTime;
+                float p = descendT / stompDescentDuration;
+                if (hitbox != null) hitbox.SetPosition(Vector2.Lerp(startPos, landingPos, p));
+                yield return null;
+            }
+            if (hitbox != null) hitbox.SetPosition(landingPos);
+
+            if (bootObj != null) StartCoroutine(FadeAndDestroyBoot(bootObj));
 
             yield return new WaitForSeconds(stompRecovery);
-
-            if (target != null)
-            {
-                disrespectTarget = target;
-                disrespectStage = 1;
-                puntDeadline = Time.time + puntFollowupWindow;
-                Debug.Log("[Disrespect] stomp resolved — punt window open for " + puntFollowupWindow + "s");
-            }
         }
 
-        if (target == grabbedTarget)
-        {
-            grabbedTarget = null;
-        }
+        grabbedTarget = null;
 
         fightingController.MovementLocked = false;
         isBusy = false;
     }
 
-    private void OnStompConnect(CombatTarget target)
+    private void OnStompConnect(CombatTarget hitTarget, CombatTarget expectedTarget)
     {
-        // Distinct floor-impact VFX — only plays if the stomp actually connected.
+        // Only counts as landing the disrespectful stomp if the boot actually hit the
+        // enemy you grabbed — not some other target that wandered into its path.
+        //
+        // Can't check hitTarget.CurrentState == Knockdown here: by the time this callback
+        // runs, CombatTarget.ApplyHit has already changed their state (the stomp itself
+        // doesn't cause a knockdown, so a real hit flips them Knockdown -> Stunned before
+        // we ever see it). Tracking the specific grabbed target instead sidesteps that.
+        if (hitTarget != expectedTarget)
+        {
+            Debug.Log("[Disrespect] boot hit " + hitTarget.name + ", but that's not the grabbed target — no floor VFX, no punt window");
+            return;
+        }
+
         if (stompFloorParticlePrefab != null)
         {
-            Instantiate(stompFloorParticlePrefab, target.transform.position, Quaternion.identity);
+            Instantiate(stompFloorParticlePrefab, hitTarget.transform.position, Quaternion.identity);
         }
+
+        disrespectTarget = hitTarget;
+        disrespectStage = 1;
+        puntDeadline = Time.time + puntFollowupWindow;
+        Debug.Log("[Disrespect] stomp landed on " + hitTarget.name + " — punt window open for " + puntFollowupWindow + "s");
     }
 
     private IEnumerator PuntKick(CombatTarget target)
@@ -828,7 +930,29 @@ public class PlayerCombat : MonoBehaviour
 
         yield return new WaitForSeconds(puntWindup);
 
-        SpawnBootKick(puntDamage, stunDuration: 0f, knockbackForce: puntKnockback, causesKnockdown: false, onConnect: null);
+        // Circular kicking arc, pivoting around OriginPos (roughly hip height) — the
+        // boot sweeps from puntArcStartAngle to puntArcEndAngle at a fixed radius,
+        // like a roundhouse. Knockback direction stays pure FacingDir regardless of
+        // exactly where along the arc the hit lands, so the "long-distance punt" is
+        // always a clean horizontal send, not whatever the arc's tangent happens to be
+        // at the moment of impact.
+        Vector2 startPos = ArcPoint(puntArcStartAngle);
+        GameObject bootObj = SpawnBootKick(puntDamage, stunDuration: puntStunDuration, knockbackForce: puntKnockback, causesKnockdown: false,
+            spawnPosition: startPos, onConnect: null);
+        MeleeHitbox hitbox = bootObj != null ? bootObj.GetComponent<MeleeHitbox>() : null;
+
+        float sweepT = 0f;
+        while (sweepT < puntSweepDuration)
+        {
+            sweepT += Time.deltaTime;
+            float p = sweepT / puntSweepDuration;
+            float angle = Mathf.Lerp(puntArcStartAngle, puntArcEndAngle, p);
+            if (hitbox != null) hitbox.SetPosition(ArcPoint(angle));
+            yield return null;
+        }
+        if (hitbox != null) hitbox.SetPosition(ArcPoint(puntArcEndAngle));
+
+        if (bootObj != null) StartCoroutine(FadeAndDestroyBoot(bootObj));
 
         yield return new WaitForSeconds(puntRecovery);
 
@@ -837,26 +961,47 @@ public class PlayerCombat : MonoBehaviour
     }
 
     /// <summary>
-    /// Spawns the boot prefab in front of the player, wires it up as a normal
-    /// MeleeHitbox swing (facing-direction only — no mouse aim), and fades the
-    /// sprite out afterward regardless of whether it connected.
+    /// World position on the punt's circular arc at the given angle (degrees), where
+    /// 0 = straight forward (facing direction), positive = rotated up/behind. Mirrors
+    /// automatically with FacingSign, so the same angle values produce a matching
+    /// swing shape whichever way the player is facing.
     /// </summary>
-    private void SpawnBootKick(float damage, float stunDuration, float knockbackForce, bool causesKnockdown, System.Action<CombatTarget> onConnect)
+    private Vector2 ArcPoint(float angleDeg)
     {
-        if (bootPrefab == null) return;
+        float worldAngle = FacingSign >= 0f ? angleDeg : 180f - angleDeg;
+        float rad = worldAngle * Mathf.Deg2Rad;
+        return OriginPos + new Vector2(Mathf.Cos(rad), Mathf.Sin(rad)) * puntArcRadius;
+    }
 
-        Vector2 spawnPos = OriginPos + FacingDir * stompSpawnDistance;
+    /// <summary>
+    /// Spawns the boot prefab at the given world position and wires it up as a normal
+    /// MeleeHitbox swing (facing-direction only — no mouse aim). Returns the spawned
+    /// GameObject (or null if bootPrefab isn't assigned) so the caller can move it
+    /// (via MeleeHitbox.SetPosition) and decide when its fade-out should start —
+    /// this method no longer starts that itself, since fading needs to wait until
+    /// whatever motion the caller is doing (stomp descent, punt arc) has finished.
+    /// </summary>
+    private GameObject SpawnBootKick(float damage, float stunDuration, float knockbackForce, bool causesKnockdown, Vector2 spawnPosition, System.Action<CombatTarget> onConnect)
+    {
+        if (bootPrefab == null) return null;
+
         float angle = FacingSign >= 0f ? 0f : 180f;
 
-        GameObject bootObj = Instantiate(bootPrefab, spawnPos, Quaternion.Euler(0f, 0f, angle));
+        GameObject bootObj = Instantiate(bootPrefab, spawnPosition, Quaternion.Euler(0f, 0f, angle));
+        // Confirms Instantiate actually ran and shows exactly where — if this log
+        // appears but nothing is visible on screen, the spawn call itself is fine and
+        // the problem is the prefab (no SpriteRenderer, 0 scale, wrong sorting layer,
+        // or spawning behind/inside another sprite), not this method.
+        Debug.Log("[Disrespect] boot spawned: " + bootObj.name + " at " + spawnPosition);
 
         MeleeHitbox hitbox = bootObj.GetComponent<MeleeHitbox>();
         if (hitbox != null)
         {
-            // We handle this boot's lifetime ourselves via the fade coroutine below,
-            // so give MeleeHitbox's own auto-destroy plenty of headroom instead of
-            // fighting over which Destroy() call wins.
-            hitbox.selfDestructTime = bootFadeDuration + 1f;
+            // We handle this boot's lifetime ourselves via the fade coroutine (started
+            // by the caller once its motion is done), so give MeleeHitbox's own
+            // auto-destroy plenty of headroom instead of fighting over which Destroy()
+            // call wins.
+            hitbox.selfDestructTime = bootFadeDuration + 2f;
             hitbox.Initialize(enemyLayer, damage, stunDuration, knockbackForce, gameObject, FacingDir,
                 onConnect, causesKnockdown);
         }
@@ -865,7 +1010,7 @@ public class PlayerCombat : MonoBehaviour
             Debug.Log("[Disrespect] bootPrefab has no MeleeHitbox component — it will spawn but never register a hit");
         }
 
-        StartCoroutine(FadeAndDestroyBoot(bootObj));
+        return bootObj;
     }
 
     private IEnumerator FadeAndDestroyBoot(GameObject boot)
@@ -888,6 +1033,7 @@ public class PlayerCombat : MonoBehaviour
 
         if (boot != null) Destroy(boot);
     }
+
 
 #if UNITY_EDITOR
     private void OnDrawGizmosSelected()

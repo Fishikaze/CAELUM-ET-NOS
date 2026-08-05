@@ -11,7 +11,7 @@ GameObject:
   - component: {fileID: 3468775634213037435}
   - component: {fileID: 18554438437226437}
   - component: {fileID: 8361388054423259749}
-  m_Layer: 0
+  m_Layer: 9
   m_Name: SmallSparks
   m_TagString: Untagged
   m_Icon: {fileID: 0}

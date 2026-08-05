@@ -40,10 +40,15 @@ public class EnemyAI : MonoBehaviour
     {
         if (player == null || playerTarget == null) return;
 
-        // Locked down by a stun/knockdown/grab, or already mid-swing: do nothing.
+        // Locked down by a stun/knockdown/grab, or already mid-swing: don't drive any
+        // movement of our own, but don't touch rb.velocity either. This used to zero
+        // out velocity.x every physics tick here, which — since it runs the instant
+        // after CombatTarget.ApplyHit sets velocity to the player's knockback — was
+        // cancelling the X component of that knockback almost immediately, leaving
+        // only Y. It wasn't protecting against anything real: the chase logic below
+        // that actually drives velocity.x doesn't run in this branch anyway.
         if (selfTarget.CurrentState != CombatTarget.State.Normal || isAttacking)
         {
-            rb.velocity = new Vector2(0f, rb.velocity.y);
             return;
         }
 

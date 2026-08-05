@@ -7,6 +7,15 @@ using UnityEngine;
 /// Movement and AI scripts should check CurrentState before acting, and stand down
 /// while it isn't Normal — that's the mechanism that makes stuns, knockdowns, and
 /// grabs actually stop the target. See EnemyAI and FightingController for examples.
+///
+/// Purely logic/state — no visual side effects. Hit flashes and the Stunned/Knockdown
+/// tint live entirely in HitReactionVisuals, which just polls CurrentState each frame.
+/// This used to also push color changes to a SpriteRenderer directly from SetState(),
+/// which fought with HitReactionVisuals for the same SpriteRenderer.color — whichever
+/// of the two ran later in a given frame would win, so the tint could flicker or get
+/// silently overwritten depending on script execution order. Removed rather than
+/// reconciled, since HitReactionVisuals already covers this (and covers Knockdown too,
+/// which this never did — it only ever tinted for Stunned).
 /// </summary>
 [RequireComponent(typeof(Rigidbody2D))]
 public class CombatTarget : MonoBehaviour
@@ -33,6 +42,8 @@ public class CombatTarget : MonoBehaviour
 
     public event System.Action<HitInfo> OnHit;
     public event System.Action OnDeath;
+    [Tooltip("Fired whenever CurrentHealth changes, with (currentHealth, maxHealth) — also fired once on Awake so a UI element can initialize before any hit happens. HealthBarUI listens to this; it's the thing to hook a health bar up to instead of polling CurrentHealth every frame.")]
+    public event System.Action<float, float> OnHealthChanged;
 
     private Rigidbody2D rb;
     private float stateTimer;
@@ -42,6 +53,7 @@ public class CombatTarget : MonoBehaviour
     {
         rb = GetComponent<Rigidbody2D>();
         CurrentHealth = maxHealth;
+        OnHealthChanged?.Invoke(CurrentHealth, maxHealth);
     }
 
     private void Update()
@@ -53,7 +65,7 @@ public class CombatTarget : MonoBehaviour
             stateTimer -= Time.deltaTime;
             if (stateTimer <= 0f)
             {
-                CurrentState = State.Normal;
+                SetState(State.Normal, 0f);
             }
         }
 
@@ -74,8 +86,16 @@ public class CombatTarget : MonoBehaviour
     /// </summary>
     public bool ApplyHit(HitInfo hit)
     {
-        if (IsInvulnerable) return false; // i-frame window — hit doesn't land at all
-        if (CurrentState == State.Grabbed) return false; // already locked into another interaction
+        if (IsInvulnerable)
+        {
+            Debug.Log("[CombatTarget] " + gameObject.name + " ignored hit — currently invulnerable");
+            return false; // i-frame window — hit doesn't land at all
+        }
+        if (CurrentState == State.Grabbed)
+        {
+            Debug.Log("[CombatTarget] " + gameObject.name + " ignored hit — currently Grabbed");
+            return false; // already locked into another interaction
+        }
 
         if (isBlocking)
         {
@@ -85,11 +105,19 @@ public class CombatTarget : MonoBehaviour
             // Small push instead of a full stun/launch — chip damage + a shove, no stun.
             if (rb != null) rb.velocity = new Vector2(hit.knockback.x * 0.15f, rb.velocity.y);
 
+            Debug.Log("[CombatTarget] " + gameObject.name + " blocked hit — full damage=" + hit.damage
+                + ", reduction=" + blockDamageReduction + ", actual damage=" + blockedDamage
+                + ", health now " + CurrentHealth + "/" + maxHealth);
+
             OnHit?.Invoke(hit);
+            OnHealthChanged?.Invoke(CurrentHealth, maxHealth);
             return true;
         }
 
         CurrentHealth -= hit.damage;
+
+        Debug.Log("[CombatTarget] " + gameObject.name + " took " + hit.damage + " damage — health now "
+            + CurrentHealth + "/" + maxHealth + " (isBlocking was false)");
 
         if (rb != null)
         {
@@ -99,6 +127,7 @@ public class CombatTarget : MonoBehaviour
         SetState(hit.causesKnockdown ? State.Knockdown : State.Stunned, hit.stunDuration);
 
         OnHit?.Invoke(hit);
+        OnHealthChanged?.Invoke(CurrentHealth, maxHealth);
 
         if (CurrentHealth <= 0f)
         {
@@ -124,7 +153,6 @@ public class CombatTarget : MonoBehaviour
 
     public void ForceNormal()
     {
-        CurrentState = State.Normal;
-        stateTimer = 0f;
+        SetState(State.Normal, 0f);
     }
 }
