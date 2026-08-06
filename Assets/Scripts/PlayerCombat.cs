@@ -91,6 +91,24 @@ public class PlayerCombat : MonoBehaviour
     public Vector2 groundCheckOffset = new Vector2(0f, -1f);
     public LayerMask groundLayer;
 
+    [Header("Block / Parry (hold Left Shift + A/D for Side, or + W for Overhead)")]
+    [Tooltip("How long the block window — and its shield visual — stays up once triggered.")]
+    public float blockWindowDuration = 0.35f;
+    [Tooltip("Minimum time between block windows, so the block key can't be spammed.")]
+    public float blockCooldown = 0.5f;
+    [Tooltip("Shown to the left/right of the player during a Side block.")]
+    public GameObject sideShieldPrefab;
+    [Tooltip("Shown above the player during an Overhead block.")]
+    public GameObject overheadShieldPrefab;
+    [Tooltip("How far to the side (in whichever direction was pressed) the side shield appears.")]
+    public float sideShieldOffset = 0.8f;
+    [Tooltip("How far above the player the overhead shield appears.")]
+    public float overheadShieldOffset = 1.2f;
+    [Tooltip("How long the shield sprite takes to fade out once its block window ends.")]
+    public float shieldFadeDuration = 0.15f;
+    [Tooltip("Spawned at the shield's position when a block actually negates a hit (CombatTarget.OnParrySuccess).")]
+    public GameObject parrySuccessParticlePrefab;
+
     [Header("Dash (double-tap A/D)")]
     public float doubleTapWindow = 0.25f;
     public float dashDistance = 3f;
@@ -240,11 +258,20 @@ public class PlayerCombat : MonoBehaviour
     private CombatTarget disrespectTarget;
     private float puntDeadline;
 
+    private float nextBlockTime;
+    private GameObject activeShield;
+    private Coroutine blockWindowRoutine;
+
     private void Awake()
     {
         rb = GetComponent<Rigidbody2D>();
         selfTarget = GetComponent<CombatTarget>();
         fightingController = GetComponent<FightingController>();
+    }
+
+    private void OnEnable()
+    {
+        selfTarget.OnParrySuccess += HandleParrySuccess;
     }
 
     private void OnDisable()
@@ -258,11 +285,43 @@ public class PlayerCombat : MonoBehaviour
         disrespectStage = 0;
         disrespectTarget = null;
         isChargingStomp = false;
+
+        selfTarget.OnParrySuccess -= HandleParrySuccess;
+        if (blockWindowRoutine != null)
+        {
+            StopCoroutine(blockWindowRoutine);
+            blockWindowRoutine = null;
+        }
+        if (activeShield != null)
+        {
+            Destroy(activeShield);
+            activeShield = null;
+        }
     }
 
     private void Update()
     {
-        selfTarget.isBlocking = Input.GetKey(BLOCK_KEY) && !isBusy && selfTarget.CurrentState == CombatTarget.State.Normal;
+        // Directional block/parry: hold Shift and tap A/D for a Side block, or W for
+        // an Overhead block. Each press opens a fresh timed block window (see
+        // BlockWindowRoutine) instead of a simple "held = blocking" flag — CombatTarget
+        // isBlocking/blockDirection are set for the window's duration, then clear
+        // automatically once it ends.
+        if (!isBusy && selfTarget.CurrentState == CombatTarget.State.Normal
+            && Time.time >= nextBlockTime && Input.GetKey(BLOCK_KEY))
+        {
+            if (Input.GetKeyDown(LEFT_KEY))
+            {
+                StartBlockWindow(AttackDirection.Side, -1f);
+            }
+            else if (Input.GetKeyDown(RIGHT_KEY))
+            {
+                StartBlockWindow(AttackDirection.Side, 1f);
+            }
+            else if (Input.GetKeyDown(COMBO_UP_KEY))
+            {
+                StartBlockWindow(AttackDirection.Overhead, 0f);
+            }
+        }
 
         if (comboTarget != null)
         {
@@ -278,9 +337,12 @@ public class PlayerCombat : MonoBehaviour
             grabbedTarget = null;
         }
 
-        // Dash double-tap detection runs even while otherwise idle-gated below,
-        // but not while already busy with something else.
-        if (!isBusy)
+        // Dash double-tap detection runs even while otherwise idle-gated below, but
+        // not while already busy, and not while Shift is held — that's block input
+        // claiming A/D for the moment, and jumping is held back the same way here
+        // (can't jump out of a block attempt). Move the jump check to its own
+        // un-gated block above if you'd rather it stay available regardless.
+        if (!isBusy && !Input.GetKey(BLOCK_KEY))
         {
             if (Input.GetKeyDown(LEFT_KEY))
             {
@@ -353,6 +415,102 @@ public class PlayerCombat : MonoBehaviour
         Vector2 center = OriginPos + Vector2.right * FacingSign * (range * 0.5f);
         Collider2D hit = Physics2D.OverlapBox(center, new Vector2(range, 1.2f), 0f, enemyLayer);
         return hit != null ? hit.GetComponent<CombatTarget>() : null;
+    }
+
+    // ---------------- Block / Parry ----------------
+
+    private void StartBlockWindow(AttackDirection direction, float sideSign)
+    {
+        nextBlockTime = Time.time + blockCooldown;
+        selfTarget.isBlocking = true;
+        selfTarget.blockDirection = direction;
+
+        Debug.Log("[Block] window opened — direction=" + direction);
+
+        if (blockWindowRoutine != null) StopCoroutine(blockWindowRoutine);
+        blockWindowRoutine = StartCoroutine(BlockWindowRoutine(direction, sideSign));
+    }
+
+    private IEnumerator BlockWindowRoutine(AttackDirection direction, float sideSign)
+    {
+        SpawnShield(direction, sideSign);
+
+        float t = 0f;
+        while (t < blockWindowDuration)
+        {
+            t += Time.deltaTime;
+            if (activeShield != null)
+            {
+                activeShield.transform.position = GetShieldPosition(direction, sideSign);
+            }
+            yield return null;
+        }
+
+        selfTarget.isBlocking = false;
+
+        if (activeShield != null)
+        {
+            StartCoroutine(FadeAndDestroyShield(activeShield, direction, sideSign));
+            activeShield = null;
+        }
+
+        blockWindowRoutine = null;
+    }
+
+    private Vector2 GetShieldPosition(AttackDirection direction, float sideSign)
+    {
+        return direction == AttackDirection.Overhead
+            ? OriginPos + Vector2.up * overheadShieldOffset
+            : OriginPos + Vector2.right * sideSign * sideShieldOffset;
+    }
+
+    private void SpawnShield(AttackDirection direction, float sideSign)
+    {
+        GameObject prefab = direction == AttackDirection.Overhead ? overheadShieldPrefab : sideShieldPrefab;
+        if (prefab == null)
+        {
+            Debug.Log("[Block] " + (direction == AttackDirection.Overhead ? "overheadShieldPrefab" : "sideShieldPrefab")
+                + " is not assigned in the Inspector — no visual, but the block window is still active.");
+            return;
+        }
+
+        if (activeShield != null) Destroy(activeShield); // shouldn't normally happen — cooldown keeps windows from overlapping
+
+        activeShield = Instantiate(prefab, GetShieldPosition(direction, sideSign), Quaternion.identity);
+    }
+
+    private IEnumerator FadeAndDestroyShield(GameObject shield, AttackDirection direction, float sideSign)
+    {
+        SpriteRenderer sr = shield != null ? shield.GetComponentInChildren<SpriteRenderer>() : null;
+        Color startColor = sr != null ? sr.color : Color.white;
+
+        float t = 0f;
+        while (t < shieldFadeDuration)
+        {
+            if (shield == null) yield break;
+            t += Time.deltaTime;
+            // Keep following while fading too, so it doesn't visibly freeze in place
+            // if the player moves during the fade-out.
+            shield.transform.position = GetShieldPosition(direction, sideSign);
+            if (sr != null)
+            {
+                float a = Mathf.Lerp(startColor.a, 0f, t / shieldFadeDuration);
+                sr.color = new Color(startColor.r, startColor.g, startColor.b, a);
+            }
+            yield return null;
+        }
+
+        if (shield != null) Destroy(shield);
+    }
+
+    private void HandleParrySuccess(AttackDirection direction)
+    {
+        Debug.Log("[Block] parried a " + direction + " attack");
+
+        if (parrySuccessParticlePrefab == null) return;
+
+        Vector2 pos = activeShield != null ? (Vector2)activeShield.transform.position : OriginPos;
+        Instantiate(parrySuccessParticlePrefab, pos, Quaternion.identity);
     }
 
     // ---------------- Jump ----------------

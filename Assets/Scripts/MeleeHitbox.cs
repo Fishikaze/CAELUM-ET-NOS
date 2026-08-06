@@ -30,15 +30,23 @@ public class MeleeHitbox : MonoBehaviour
     private GameObject source;
     private Vector2 direction = Vector2.right;
     private bool causesKnockdown;
+    private AttackDirection attackDirection = AttackDirection.Side;
     private System.Action<CombatTarget> onHit;
 
     private Collider2D col;
     private bool hasHit;
     private Vector2 pinnedPosition;
 
-    /// <summary>Call immediately after Instantiate. direction should already be normalized (e.g. aimed at the mouse).</summary>
+    /// <summary>
+    /// Call immediately after Instantiate. direction should already be normalized.
+    /// attackDirection tags this swing for CombatTarget's block/parry check — defaults
+    /// to Side, matching every existing caller (Kick/Slam/Boot) which don't specify one
+    /// and don't need to, since only attacks that land on something with an active
+    /// directional block (currently just the player) ever have this checked at all.
+    /// </summary>
     public void Initialize(LayerMask targetLayer, float damage, float stunDuration, float knockbackForce,
-        GameObject source, Vector2 direction, System.Action<CombatTarget> onHit = null, bool causesKnockdown = false)
+        GameObject source, Vector2 direction, System.Action<CombatTarget> onHit = null, bool causesKnockdown = false,
+        AttackDirection attackDirection = AttackDirection.Side)
     {
         this.targetLayer = targetLayer;
         this.damage = damage;
@@ -48,6 +56,7 @@ public class MeleeHitbox : MonoBehaviour
         this.direction = direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector2.right;
         this.onHit = onHit;
         this.causesKnockdown = causesKnockdown;
+        this.attackDirection = attackDirection;
 
         col = GetComponent<Collider2D>();
         col.isTrigger = true;
@@ -61,7 +70,7 @@ public class MeleeHitbox : MonoBehaviour
 
         Debug.Log("[MeleeHitbox] Initialize on " + gameObject.name + " — targetLayer=" + targetLayer.value
             + ", collider=" + col.GetType().Name + " enabled=" + col.enabled + " isTrigger=" + col.isTrigger
-            + ", pinned at " + pinnedPosition);
+            + ", attackDirection=" + attackDirection + ", pinned at " + pinnedPosition);
     }
 
     private void Start()
@@ -125,11 +134,21 @@ public class MeleeHitbox : MonoBehaviour
         if (col != null) col.enabled = false; // one hit per swing, even if it lingers near multiple enemies
 
         Vector2 knockback = direction * knockbackForce;
-        target.ApplyHit(new HitInfo(damage, stunDuration, knockback, source, causesKnockdown));
+        bool landed = target.ApplyHit(new HitInfo(damage, stunDuration, knockback, source, causesKnockdown), attackDirection);
 
-        Debug.Log("[MeleeHitbox] connected with " + target.name);
-
-        HitStop.Trigger(hitStopDuration);
-        onHit?.Invoke(target);
+        if (landed)
+        {
+            Debug.Log("[MeleeHitbox] connected with " + target.name);
+            HitStop.Trigger(hitStopDuration);
+            onHit?.Invoke(target);
+        }
+        else
+        {
+            // Parried, invulnerable, or already Grabbed — ApplyHit no-sold it entirely.
+            // onHit intentionally does NOT fire here: callers use it to mean "this hit
+            // actually landed" (e.g. deciding whether to follow up a combo), and firing
+            // it on a no-sold hit would be wrong regardless of the reason.
+            Debug.Log("[MeleeHitbox] hit " + target.name + " but it didn't land (parried/invulnerable/grabbed) — onHit not fired");
+        }
     }
 }
