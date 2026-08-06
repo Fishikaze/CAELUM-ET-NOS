@@ -6,16 +6,19 @@ using UnityEngine;
 ///
 /// Movement and AI scripts should check CurrentState before acting, and stand down
 /// while it isn't Normal — that's the mechanism that makes stuns, knockdowns, and
-/// grabs actually stop the target. See EnemyAI and FightingController for examples.
+/// grabs actually stop the target. See EnemyAI, BossAI, and FightingController for
+/// examples.
+///
+/// Blocking is a directional parry, not a damage-reduction chip-block: a hit is
+/// fully negated only when isBlocking is true AND blockDirection matches the
+/// attack's own AttackDirection tag exactly (Unblockable attacks are never negated,
+/// regardless of blockDirection). There's no partial/wrong-direction protection —
+/// mismatched or absent blocking takes full damage. PlayerCombat drives isBlocking
+/// and blockDirection from its own directional block-window input; nothing here
+/// decides timing or direction, this just checks the match at the moment of impact.
 ///
 /// Purely logic/state — no visual side effects. Hit flashes and the Stunned/Knockdown
 /// tint live entirely in HitReactionVisuals, which just polls CurrentState each frame.
-/// This used to also push color changes to a SpriteRenderer directly from SetState(),
-/// which fought with HitReactionVisuals for the same SpriteRenderer.color — whichever
-/// of the two ran later in a given frame would win, so the tint could flicker or get
-/// silently overwritten depending on script execution order. Removed rather than
-/// reconciled, since HitReactionVisuals already covers this (and covers Knockdown too,
-/// which this never did — it only ever tinted for Stunned).
 /// </summary>
 [RequireComponent(typeof(Rigidbody2D))]
 public class CombatTarget : MonoBehaviour
@@ -26,10 +29,11 @@ public class CombatTarget : MonoBehaviour
     public float maxHealth = 100f;
     public float CurrentHealth { get; private set; }
 
-    [Header("Blocking (only meaningful if this target can block, e.g. the player)")]
-    [Tooltip("Drive this from your own input script (e.g. PlayerCombat sets it while block is held).")]
+    [Header("Blocking / Parry (only meaningful if this target can block, e.g. the player)")]
+    [Tooltip("True while an active block window is up. Drive this from your own input script (e.g. PlayerCombat while a block window is open).")]
     public bool isBlocking = false;
-    [Range(0f, 1f)] public float blockDamageReduction = 0.9f;
+    [Tooltip("Which direction the current block window is guarding — only meaningful while isBlocking is true.")]
+    public AttackDirection blockDirection = AttackDirection.Side;
 
     public State CurrentState { get; private set; } = State.Normal;
     public bool IsAvailableForCombo => CurrentState == State.Stunned || CurrentState == State.Knockdown;
@@ -42,8 +46,10 @@ public class CombatTarget : MonoBehaviour
 
     public event System.Action<HitInfo> OnHit;
     public event System.Action OnDeath;
-    [Tooltip("Fired whenever CurrentHealth changes, with (currentHealth, maxHealth) — also fired once on Awake so a UI element can initialize before any hit happens. HealthBarUI listens to this; it's the thing to hook a health bar up to instead of polling CurrentHealth every frame.")]
+    [Tooltip("Fired whenever CurrentHealth changes, with (currentHealth, maxHealth) — also fired once on Awake so a UI element can initialize before any hit happens.")]
     public event System.Action<float, float> OnHealthChanged;
+    [Tooltip("Fired when isBlocking + blockDirection successfully negates a hit, with the AttackDirection that was blocked — this is what a shield-particle effect should hook into.")]
+    public event System.Action<AttackDirection> OnParrySuccess;
 
     private Rigidbody2D rb;
     private float stateTimer;
@@ -81,43 +87,27 @@ public class CombatTarget : MonoBehaviour
 
     /// <summary>
     /// Main entry point for landing a hit on this target. Returns true if the hit
-    /// actually connected (as opposed to being fully no-sold), so attackers can
-    /// decide whether it's safe to continue a combo.
+    /// actually connected (as opposed to being fully no-sold via i-frames or a
+    /// successful parry), so attackers can decide whether it's safe to continue a combo.
+    ///
+    /// attackDirection defaults to Side so every existing call site (Kick/Slam/Boot in
+    /// PlayerCombat, EnemyAI's basic attack) keeps compiling and behaving the same —
+    /// only attacks that specifically want to participate in the parry system
+    /// (currently the boss, via MeleeHitbox's attackDirection param) need to pass one.
     /// </summary>
-    public bool ApplyHit(HitInfo hit)
+    public bool ApplyHit(HitInfo hit, AttackDirection attackDirection = AttackDirection.Side)
     {
-        if (IsInvulnerable)
+        if (IsInvulnerable) return false; // i-frame window — hit doesn't land at all
+        if (CurrentState == State.Grabbed) return false; // already locked into another interaction
+
+        if (isBlocking && attackDirection != AttackDirection.Unblockable && blockDirection == attackDirection)
         {
-            Debug.Log("[CombatTarget] " + gameObject.name + " ignored hit — currently invulnerable");
-            return false; // i-frame window — hit doesn't land at all
-        }
-        if (CurrentState == State.Grabbed)
-        {
-            Debug.Log("[CombatTarget] " + gameObject.name + " ignored hit — currently Grabbed");
-            return false; // already locked into another interaction
-        }
-
-        if (isBlocking)
-        {
-            float blockedDamage = hit.damage * (1f - blockDamageReduction);
-            CurrentHealth -= blockedDamage;
-
-            // Small push instead of a full stun/launch — chip damage + a shove, no stun.
-            if (rb != null) rb.velocity = new Vector2(hit.knockback.x * 0.15f, rb.velocity.y);
-
-            Debug.Log("[CombatTarget] " + gameObject.name + " blocked hit — full damage=" + hit.damage
-                + ", reduction=" + blockDamageReduction + ", actual damage=" + blockedDamage
-                + ", health now " + CurrentHealth + "/" + maxHealth);
-
-            OnHit?.Invoke(hit);
-            OnHealthChanged?.Invoke(CurrentHealth, maxHealth);
-            return true;
+            // Full parry: no damage, no knockback, no state change at all.
+            OnParrySuccess?.Invoke(attackDirection);
+            return false;
         }
 
         CurrentHealth -= hit.damage;
-
-        Debug.Log("[CombatTarget] " + gameObject.name + " took " + hit.damage + " damage — health now "
-            + CurrentHealth + "/" + maxHealth + " (isBlocking was false)");
 
         if (rb != null)
         {
