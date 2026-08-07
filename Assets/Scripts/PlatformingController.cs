@@ -24,6 +24,10 @@ public class PlatformingController : MonoBehaviour
     public float groundCheckRadius = 0.15f;
     public LayerMask groundLayer;
 
+    [Header("Wall Friction")]
+    [Tooltip("If the player's Collider2D has no Physics Material 2D assigned, one with 0 friction is created and applied at runtime. This is what stops the player sticking to walls: with the default (nonzero) friction, pressing into a wall while falling generates enough friction against that vertical surface to fight gravity and stall the player mid-air instead of sliding down it. Leave this on unless you've already set up your own zero-friction material on the collider (in which case that one wins and this does nothing).")]
+    public bool preventWallSticking = true;
+
     [Header("Animation")]
     [Tooltip("Auto-found via GetComponent/GetComponentInChildren if left empty.")]
     public Animator animator;
@@ -51,6 +55,34 @@ public class PlatformingController : MonoBehaviour
         if (animator == null) animator = GetComponentInChildren<Animator>();
         if (spriteRenderer == null) spriteRenderer = GetComponent<SpriteRenderer>();
         if (spriteRenderer == null) spriteRenderer = GetComponentInChildren<SpriteRenderer>();
+
+        if (preventWallSticking)
+        {
+            ApplyZeroFrictionMaterial();
+        }
+    }
+
+    /// <summary>
+    /// Assigns a 0-friction Physics Material 2D to the player's own Collider2D,
+    /// replacing whatever material (if any) is already there — including the
+    /// project's default, which is the usual source of the stick since its friction
+    /// is nonzero. Doesn't touch the wall/ground colliders themselves — Unity 2D
+    /// friction between two colliders combines as sqrt(frictionA * frictionB), so a
+    /// frictionless material on just this side is enough to zero it out either way.
+    /// </summary>
+    private void ApplyZeroFrictionMaterial()
+    {
+        Collider2D col = GetComponent<Collider2D>();
+        if (col == null) col = GetComponentInChildren<Collider2D>();
+        if (col == null) return;
+
+        PhysicsMaterial2D noFriction = new PhysicsMaterial2D("PlayerNoFriction")
+        {
+            friction = 0f,
+            bounciness = 0f
+        };
+        col.sharedMaterial = noFriction;
+        Debug.Log("[PlatformingController] applied zero-friction material to " + col.name);
     }
 
     private void Update()

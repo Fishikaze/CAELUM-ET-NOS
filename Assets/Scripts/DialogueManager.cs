@@ -23,6 +23,7 @@ public class DialogueManager : MonoBehaviour
     private int currentIndex;
     private bool isTyping;
     private Coroutine typeCoroutine;
+    private System.Action pendingOnComplete;
 
     private void Awake()
     {
@@ -50,13 +51,14 @@ public class DialogueManager : MonoBehaviour
         }
     }
 
-    public void StartDialogue(DialogueLine[] lines)
+    public void StartDialogue(DialogueLine[] lines, System.Action onComplete = null)
     {
         if (lines == null || lines.Length == 0) return;
 
         currentLines = lines;
         currentIndex = 0;
         IsDialogueActive = true;
+        pendingOnComplete = onComplete;
 
         if (dialogueBox != null)
             dialogueBox.SetActive(true);
@@ -134,5 +136,9 @@ public class DialogueManager : MonoBehaviour
 
         if (dialogueBox != null)
             dialogueBox.SetActive(false);
+
+        System.Action callback = pendingOnComplete;
+        pendingOnComplete = null;
+        callback?.Invoke();
     }
 }

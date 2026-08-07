@@ -21,6 +21,9 @@ public class DialogueTrigger : MonoBehaviour
 
     public bool IsPlayerInRange { get; private set; }
 
+    /// <summary>Fired when a dialogue started via this trigger's Interact() finishes.</summary>
+    public event System.Action OnDialogueFinished;
+
     private Vector3 promptBasePosition;
 
     private void Awake()
@@ -81,6 +84,6 @@ public class DialogueTrigger : MonoBehaviour
     public void Interact()
     {
         if (lines == null || lines.Length == 0) return;
-        DialogueManager.Instance.StartDialogue(lines);
+        DialogueManager.Instance.StartDialogue(lines, () => OnDialogueFinished?.Invoke());
     }
 }

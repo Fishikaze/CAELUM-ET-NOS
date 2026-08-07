@@ -1,5 +1,6 @@
 using System.Collections;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 /// <summary>
 /// Boss controller. Four attacks in rotation:
@@ -34,6 +35,18 @@ using UnityEngine;
 /// of whichever chain was running — a force-stopped coroutine never reaches its own
 /// cleanup code.
 ///
+/// IMPORTANT: every sub-step of an attack chain (ChooseNextChain -> RunXChain ->
+/// PlayAnimatedSwing/SwingSlashTimer/RetreatFromPlayer) is chained with plain
+/// `yield return SomeMethod();` rather than `yield return StartCoroutine(SomeMethod());`.
+/// This is deliberate, not an oversight: StopCoroutine() only cancels the exact
+/// Coroutine handle it's given, it does NOT cascade into coroutines that were
+/// launched via a nested StartCoroutine() call inside that coroutine's body. If any
+/// step here goes back to wrapping in StartCoroutine, MainLoop's
+/// StopCoroutine(chain) on interruption will stop only the outermost wrapper while
+/// the rest of the chain keeps running orphaned in the background — silently
+/// finishing its swing (and firing AnimEvent_SpawnHitbox off stale staged data)
+/// while MainLoop has already moved on and started a new chain.
+///
 /// Phases: currentPhase only ever sits at Phase1 right now — CheckPhaseTransition is
 /// the deliberate no-op stub where the half-HP run-away and Phase2 (blue attacks)
 /// switch-over both plug in later, per the original brief not to build those yet.
@@ -49,6 +62,10 @@ public class BossAI : MonoBehaviour
     public LayerMask playerLayer;
     [Tooltip("Empty child positioned at chest height. Hitboxes spawn relative to here.")]
     public Transform hitOrigin;
+
+    [Header("Death")]
+    [Tooltip("Scene loaded when the boss dies. Must be added under File > Build Settings > Scenes In Build, or LoadScene will throw.")]
+    public string endScreenSceneName = "EndScreen";
 
     [Header("Movement")]
     public float moveSpeed = 2f;
@@ -277,6 +294,12 @@ public class BossAI : MonoBehaviour
             {
                 if (selfTarget.CurrentState != CombatTarget.State.Normal)
                 {
+                    // This actually cancels the whole in-progress chain now, because
+                    // every step downstream (ChooseNextChain -> RunXChain ->
+                    // PlayAnimatedSwing/SwingSlashTimer/RetreatFromPlayer) is chained
+                    // with `yield return SomeMethod()` rather than nested
+                    // StartCoroutine calls, so it's all one coroutine under this
+                    // single handle. See the class-level architecture note.
                     StopCoroutine(chain);
                     chainRunning = false;
                     break;
@@ -288,7 +311,7 @@ public class BossAI : MonoBehaviour
 
     private IEnumerator RunChainAndClearFlag(IEnumerator chain)
     {
-        yield return StartCoroutine(chain);
+        yield return chain;
         chainRunning = false;
     }
 
@@ -306,7 +329,7 @@ public class BossAI : MonoBehaviour
         if (thrustPending)
         {
             thrustPending = false;
-            yield return StartCoroutine(RunThrustAttack());
+            yield return RunThrustAttack();
             yield break;
         }
 
@@ -317,15 +340,15 @@ public class BossAI : MonoBehaviour
 
         if (roll < 0.4f)
         {
-            yield return StartCoroutine(RunBasicAttackChain());
+            yield return RunBasicAttackChain();
         }
         else if (roll < 0.65f)
         {
-            yield return StartCoroutine(RunOverheadAttack());
+            yield return RunOverheadAttack();
         }
         else
         {
-            yield return StartCoroutine(RunComboChain());
+            yield return RunComboChain();
         }
     }
 
@@ -417,9 +440,9 @@ public class BossAI : MonoBehaviour
             // Tagged Overhead for blocking purposes even though this is the forward
             // slash animation — swapped per request: side-looking attacks block as
             // Overhead, and vice versa.
-            yield return StartCoroutine(PlayAnimatedSwing(forwardSlashAnimTrigger, slashHitboxPrefab,
+            yield return PlayAnimatedSwing(forwardSlashAnimTrigger, slashHitboxPrefab,
                 AttackDirection.Overhead, slashDamage, slashStun, slashKnockback, slashSpawnDistance,
-                target => lastSlashConnected = true));
+                target => lastSlashConnected = true);
 
             bool isLastSlash = i == basicChainSlashCount - 1;
             if (!isLastSlash)
@@ -434,8 +457,8 @@ public class BossAI : MonoBehaviour
             // lag — naturally dodgeable if the player dashes out of their stun in
             // time, since the hitbox only covers where they were standing.
             // Tagged Side for blocking purposes — swapped, same as above.
-            yield return StartCoroutine(PlayAnimatedSwing(overheadAnimTrigger, downSlashHitboxPrefab,
-                AttackDirection.Side, downSlashDamage, downSlashStun, downSlashKnockback, slashSpawnDistance, null));
+            yield return PlayAnimatedSwing(overheadAnimTrigger, downSlashHitboxPrefab,
+                AttackDirection.Side, downSlashDamage, downSlashStun, downSlashKnockback, slashSpawnDistance, null);
         }
 
         yield return new WaitForSeconds(chainEndLag);
@@ -446,8 +469,8 @@ public class BossAI : MonoBehaviour
     private IEnumerator RunOverheadAttack()
     {
         // Tagged Side for blocking purposes (swapped) even though the animation is Down.
-        yield return StartCoroutine(PlayAnimatedSwing(overheadAnimTrigger, downSlashHitboxPrefab,
-            AttackDirection.Side, downSlashDamage, downSlashStun, downSlashKnockback, slashSpawnDistance, null));
+        yield return PlayAnimatedSwing(overheadAnimTrigger, downSlashHitboxPrefab,
+            AttackDirection.Side, downSlashDamage, downSlashStun, downSlashKnockback, slashSpawnDistance, null);
 
         yield return new WaitForSeconds(overheadAttackEndLag);
     }
@@ -461,16 +484,16 @@ public class BossAI : MonoBehaviour
         for (int i = 0; i < comboSlashCount; i++)
         {
             // Tagged Overhead for blocking purposes (swapped, same as Basic Swing's slashes).
-            yield return StartCoroutine(PlayAnimatedSwing(forwardSlashAnimTrigger, slashHitboxPrefab,
-                AttackDirection.Overhead, slashDamage, slashStun, slashKnockback, slashSpawnDistance, null));
+            yield return PlayAnimatedSwing(forwardSlashAnimTrigger, slashHitboxPrefab,
+                AttackDirection.Overhead, slashDamage, slashStun, slashKnockback, slashSpawnDistance, null);
             yield return new WaitForSeconds(slashRecovery);
         }
 
         // No dedicated kick animation exists — plain hardcoded timer, no bool/event.
         // Unblockable isn't part of the Side/Overhead swap.
-        yield return StartCoroutine(SwingSlashTimer(comboKickHitboxPrefab, AttackDirection.Unblockable,
+        yield return SwingSlashTimer(comboKickHitboxPrefab, AttackDirection.Unblockable,
             comboKickDamage, comboKickStun, 0f, comboKickSpawnDistance, comboKickWindup, comboKickActiveDuration,
-            null, heightOffset: comboKickHeightOffset));
+            null, heightOffset: comboKickHeightOffset);
 
         if (spriteRenderer != null) spriteRenderer.color = normalSpriteColor;
 
@@ -482,12 +505,12 @@ public class BossAI : MonoBehaviour
     private IEnumerator RunThrustAttack()
     {
         // Tagged Overhead for blocking purposes (swapped, same as the other forward-facing swings).
-        yield return StartCoroutine(PlayAnimatedSwing(thrustAnimTrigger, thrustHitboxPrefab,
-            AttackDirection.Overhead, thrustDamage, thrustStun, thrustKnockback, thrustSpawnDistance, null));
+        yield return PlayAnimatedSwing(thrustAnimTrigger, thrustHitboxPrefab,
+            AttackDirection.Overhead, thrustDamage, thrustStun, thrustKnockback, thrustSpawnDistance, null);
 
         yield return new WaitForSeconds(thrustEndLag);
 
-        yield return StartCoroutine(RetreatFromPlayer(thrustRetreatDistance, thrustRetreatDuration));
+        yield return RetreatFromPlayer(thrustRetreatDistance, thrustRetreatDuration);
     }
 
     /// <summary>
@@ -551,7 +574,9 @@ public class BossAI : MonoBehaviour
         Debug.Log("[BossAI] defeated");
         StopAllCoroutines();
         chainRunning = false;
-        // TODO: whatever the actual defeat sequence should be — not specified yet.
+        // TODO: whatever the actual defeat sequence should be (death animation, delay,
+        // fade, etc.) — not specified yet. For now this cuts straight to EndScreen.
+        SceneManager.LoadScene(endScreenSceneName);
     }
 
     /// <summary>
