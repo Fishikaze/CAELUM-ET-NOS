@@ -24,6 +24,16 @@ public class PlatformingController : MonoBehaviour
     public float groundCheckRadius = 0.15f;
     public LayerMask groundLayer;
 
+    [Header("Animation")]
+    [Tooltip("Auto-found via GetComponent/GetComponentInChildren if left empty.")]
+    public Animator animator;
+    [Tooltip("Auto-found via GetComponent/GetComponentInChildren if left empty. Flips via SpriteRenderer.flipX (not the whole transform), same approach as PlayerCombat uses in Fighting mode — keeps physics/collision untouched.")]
+    public SpriteRenderer spriteRenderer;
+    [Tooltip("Animator BOOL parameter driven continuously by horizontal speed — same parameter name PlayerCombat uses in Fighting mode, so both controllers drive the same Animator Controller state consistently regardless of which mode is active.")]
+    public string isMovingAnimParam = "IsMoving";
+    [Tooltip("Horizontal speed above which the player counts as 'running' for animation purposes.")]
+    public float runAnimThreshold = 0.1f;
+
     public float FacingSign { get; private set; } = 1f;
 
     private Rigidbody2D rb;
@@ -36,6 +46,11 @@ public class PlatformingController : MonoBehaviour
     {
         rb = GetComponent<Rigidbody2D>();
         defaultGravityScale = rb.gravityScale;
+
+        if (animator == null) animator = GetComponent<Animator>();
+        if (animator == null) animator = GetComponentInChildren<Animator>();
+        if (spriteRenderer == null) spriteRenderer = GetComponent<SpriteRenderer>();
+        if (spriteRenderer == null) spriteRenderer = GetComponentInChildren<SpriteRenderer>();
     }
 
     private void Update()
@@ -51,6 +66,24 @@ public class PlatformingController : MonoBehaviour
         if (Input.GetButtonUp("Jump") && rb.velocity.y > 0f)
         {
             rb.velocity = new Vector2(rb.velocity.x, rb.velocity.y * 0.5f);
+        }
+
+        // Same flip approach as PlayerCombat's Fighting-mode version — mirrors the
+        // sprite based on FacingSign (set below in FixedUpdate from horizontal input),
+        // assuming default/unflipped art faces right. Flip the condition to > 0f if
+        // your sprite's default orientation is actually left-facing.
+        if (spriteRenderer != null)
+        {
+            spriteRenderer.flipX = FacingSign < 0f;
+        }
+
+        // Running/Idle — PlayerCombat drives this same parameter while in Fighting
+        // mode, but it's disabled while Platforming, so nothing was setting it here
+        // before. Without this, the Animator just sits wherever it last was instead
+        // of transitioning to Run at all while platforming.
+        if (animator != null)
+        {
+            animator.SetBool(isMovingAnimParam, Mathf.Abs(rb.velocity.x) > runAnimThreshold);
         }
     }
 

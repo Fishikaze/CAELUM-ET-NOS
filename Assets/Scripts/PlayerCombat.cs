@@ -85,6 +85,22 @@ public class PlayerCombat : MonoBehaviour
     [Tooltip("Empty child positioned at chest height. Hit checks originate here.")]
     public Transform hitOrigin;
 
+    [Header("Animation")]
+    [Tooltip("Auto-found via GetComponent/GetComponentInChildren if left empty.")]
+    public Animator animator;
+    [Tooltip("Auto-found via GetComponent/GetComponentInChildren if left empty. Used to flip the sprite (SpriteRenderer.flipX), not the whole transform — negatively scaling a transform that also carries the Rigidbody2D/Collider2D can cause physics issues, so only the visual mirrors.")]
+    public SpriteRenderer spriteRenderer;
+    [Tooltip("Animator BOOL parameter driven continuously by horizontal speed — true while running, false while idle.")]
+    public string isMovingAnimParam = "IsMoving";
+    [Tooltip("Horizontal speed above which the player counts as 'running' for animation purposes.")]
+    public float runAnimThreshold = 0.1f;
+    [Tooltip("Animator TRIGGER fired for the 1st/3rd hits of the J combo (the one that starts it).")]
+    public string punchLeftAnimTrigger = "PunchLeft";
+    [Tooltip("Animator TRIGGER fired for the 2nd/4th hits of the J combo (alternates with PunchLeft).")]
+    public string punchRightAnimTrigger = "PunchRight";
+    [Tooltip("Animator TRIGGER fired for every other action — Kick (both hits), Dash+Kick, Slam, Grab, and both stages of the Disrespectful Kick. One shared animation for everything that isn't a J punch, idle, or running.")]
+    public string specialAnimTrigger = "Special";
+
     [Header("Jump")]
     public float jumpForce = 8f;
     public float groundCheckRadius = 0.2f;
@@ -108,6 +124,8 @@ public class PlayerCombat : MonoBehaviour
     public float shieldFadeDuration = 0.15f;
     [Tooltip("Spawned at the shield's position when a block actually negates a hit (CombatTarget.OnParrySuccess).")]
     public GameObject parrySuccessParticlePrefab;
+    [Tooltip("Played through SoundManager when a block/parry successfully negates a hit.")]
+    public AudioClip blockSuccessClip;
 
     [Header("Dash (double-tap A/D)")]
     public float doubleTapWindow = 0.25f;
@@ -267,6 +285,11 @@ public class PlayerCombat : MonoBehaviour
         rb = GetComponent<Rigidbody2D>();
         selfTarget = GetComponent<CombatTarget>();
         fightingController = GetComponent<FightingController>();
+
+        if (animator == null) animator = GetComponent<Animator>();
+        if (animator == null) animator = GetComponentInChildren<Animator>();
+        if (spriteRenderer == null) spriteRenderer = GetComponent<SpriteRenderer>();
+        if (spriteRenderer == null) spriteRenderer = GetComponentInChildren<SpriteRenderer>();
     }
 
     private void OnEnable()
@@ -301,6 +324,24 @@ public class PlayerCombat : MonoBehaviour
 
     private void Update()
     {
+        // Face the correct direction — mirrors the sprite (not the whole transform)
+        // based on FacingSign, which FightingController already drives from movement
+        // input. Default/unflipped art is assumed to face right, since that's the
+        // "always facing right" behavior this replaces — flip this condition if your
+        // sprite's default orientation is actually left-facing.
+        if (spriteRenderer != null)
+        {
+            spriteRenderer.flipX = FacingSign < 0f;
+        }
+
+        // Running/Idle reflects actual horizontal speed regardless of what else is
+        // going on — updated unconditionally, unlike every other trigger below which
+        // only fires at the moment a specific action starts.
+        if (animator != null)
+        {
+            animator.SetBool(isMovingAnimParam, Mathf.Abs(rb.velocity.x) > runAnimThreshold);
+        }
+
         // Directional block/parry: hold Shift and tap A/D for a Side block, or W for
         // an Overhead block. Each press opens a fresh timed block window (see
         // BlockWindowRoutine) instead of a simple "held = blocking" flag — CombatTarget
@@ -417,6 +458,20 @@ public class PlayerCombat : MonoBehaviour
         return hit != null ? hit.GetComponent<CombatTarget>() : null;
     }
 
+    /// <summary>Fires PunchLeft or PunchRight — called from LandComboHit, alternating starting with Left on the first hit of a fresh combo.</summary>
+    private void PlayPunchAnim(bool isLeft)
+    {
+        if (animator == null) return;
+        animator.SetTrigger(isLeft ? punchLeftAnimTrigger : punchRightAnimTrigger);
+    }
+
+    /// <summary>Fires the shared Special trigger — called at the start of every action that isn't a J punch: Kick, Dash+Kick, Slam, Grab, and both stages of the Disrespectful Kick.</summary>
+    private void PlaySpecialAnim()
+    {
+        if (animator == null) return;
+        animator.SetTrigger(specialAnimTrigger);
+    }
+
     // ---------------- Block / Parry ----------------
 
     private void StartBlockWindow(AttackDirection direction, float sideSign)
@@ -507,6 +562,11 @@ public class PlayerCombat : MonoBehaviour
     {
         Debug.Log("[Block] parried a " + direction + " attack");
 
+        if (SoundManager.Instance != null && blockSuccessClip != null)
+        {
+            SoundManager.Instance.PlaySFX(blockSuccessClip);
+        }
+
         if (parrySuccessParticlePrefab == null) return;
 
         Vector2 pos = activeShield != null ? (Vector2)activeShield.transform.position : OriginPos;
@@ -594,6 +654,10 @@ public class PlayerCombat : MonoBehaviour
     private void LandComboHit(CombatTarget target)
     {
         bool isFinisher = comboCount + 1 >= maxComboHits;
+
+        // Alternates Left/Right starting with Left on hit 1 — comboCount is still the
+        // PRE-increment value here (0 on hit 1, 1 on hit 2, ...), so even = Left.
+        PlayPunchAnim(comboCount % 2 == 0);
 
         Vector2 knockback = isFinisher
             ? new Vector2(comboFinisherKnockback.x * FacingSign, comboFinisherKnockback.y)
@@ -689,6 +753,7 @@ public class PlayerCombat : MonoBehaviour
     {
         isBusy = true;
         fightingController.MovementLocked = true;
+        PlaySpecialAnim();
 
         if (kickHitboxPrefab != null)
         {
@@ -754,6 +819,7 @@ public class PlayerCombat : MonoBehaviour
         isBusy = true;
         fightingController.MovementLocked = true;
         dashKickWindowUntil = -999f; // consume the window
+        PlaySpecialAnim();
 
         Vector2 start = rb.position;
         Vector2 end = start + Vector2.right * FacingSign * forwardKickDashDistance;
@@ -839,6 +905,7 @@ public class PlayerCombat : MonoBehaviour
         isBusy = true;
         fightingController.MovementLocked = true;
         nextSlamTime = Time.time + slamCooldown;
+        PlaySpecialAnim();
 
         yield return new WaitForSeconds(slamWindup);
 
@@ -911,6 +978,7 @@ public class PlayerCombat : MonoBehaviour
         isBusy = true;
         fightingController.MovementLocked = true;
         nextGrabTime = Time.time + grabCooldown;
+        PlaySpecialAnim();
 
         bool cancelled = false;
         System.Action<HitInfo> cancelHandler = _ => cancelled = true;
@@ -993,6 +1061,7 @@ public class PlayerCombat : MonoBehaviour
         fightingController.MovementLocked = true;
         isChargingStomp = true;
         cancelStompRequested = false;
+        PlaySpecialAnim();
 
         bool cancelledByHit = false;
         System.Action<HitInfo> cancelHandler = _ => cancelledByHit = true;
@@ -1085,6 +1154,7 @@ public class PlayerCombat : MonoBehaviour
         fightingController.MovementLocked = true;
         disrespectStage = 0;
         disrespectTarget = null;
+        PlaySpecialAnim();
 
         yield return new WaitForSeconds(puntWindup);
 
